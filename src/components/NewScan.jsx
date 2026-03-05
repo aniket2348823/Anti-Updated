@@ -18,6 +18,7 @@ const NewScan = ({ navigate }) => {
         { name: 'Auth Bypass Tester', desc: 'Systematic testing of authentication gates', selected: false }
     ]);
     const [isConnected, setIsConnected] = useState(false);
+    const localConnectedRef = useRef(false);
     const [requestRate, setRequestRate] = useState(450);
     const [concurrency, setConcurrency] = useState(50);
     const [estimatedDuration, setEstimatedDuration] = useState(45); // Initial state
@@ -47,23 +48,37 @@ const NewScan = ({ navigate }) => {
     useEffect(() => {
         if (!isExtensionEnabled) {
             setIsConnected(false);
+            localConnectedRef.current = false;
             return;
         }
 
         // 1. Extension Handshake
         const handleMessage = (event) => {
             if (event.data?.type === 'ANTIGRAVITY_EXTENSION_CONNECTED') {
+                console.log("[FRONTEND] Extension Handshake Success (postMessage)");
                 setIsConnected(true);
+                localConnectedRef.current = true;
             }
         };
+
+        const handleCustomEvent = () => {
+            console.log("[FRONTEND] Extension Handshake Success (CustomEvent)");
+            setIsConnected(true);
+            localConnectedRef.current = true;
+        };
+
         window.addEventListener('message', handleMessage);
+        document.addEventListener('ANTIGRAVITY_EXTENSION_HEARTBEAT', handleCustomEvent);
 
         // Check if already connected via backend state (redundancy)
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             // trigger a check if needed, but usually passive
         }
 
-        return () => window.removeEventListener('message', handleMessage);
+        return () => {
+            window.removeEventListener('message', handleMessage);
+            document.removeEventListener('ANTIGRAVITY_EXTENSION_HEARTBEAT', handleCustomEvent);
+        };
     }, [isExtensionEnabled]);
 
     useEffect(() => {
@@ -92,7 +107,12 @@ const NewScan = ({ navigate }) => {
                 } else if (data.type === 'SPY_STATUS') {
                     console.log("Spy Status Update:", data.payload);
                     if (isExtensionEnabled) {
-                        setIsConnected(data.payload.connected);
+                        // Prioritize local handshake over backend status
+                        if (data.payload.connected) {
+                            setIsConnected(true);
+                        } else if (!localConnectedRef.current) {
+                            setIsConnected(false);
+                        }
                     }
                 }
             } catch (e) {
@@ -109,17 +129,11 @@ const NewScan = ({ navigate }) => {
 
     // Recalculate duration whenever relevant state changes
     useEffect(() => {
-        // Calculate duration logic
+        // Depth scan = 240s (4 mins), Standard scan = 180s (3 mins)
         const activeModuleCount = activeScanModules.filter(m => m.selected).length;
-        const baseMinutesPerModule = 15;
-        const passiveTime = 10;
-
-        const calculated = Math.round(
-            (passiveTime + (activeModuleCount * baseMinutesPerModule)) * (50 / Math.max(concurrency, 1)) * // Avoid division by zero
-            (450 / Math.max(requestRate, 10)) // Avoid division by zero/tiny numbers
-        );
-        setEstimatedDuration(Math.max(calculated, 1)); // Minimum 1 minute
-    }, [activeScanModules, requestRate, concurrency]);
+        const durationSeconds = activeModuleCount >= 5 ? 240 : 180;
+        setEstimatedDuration(Math.ceil(durationSeconds / 60));
+    }, [activeScanModules]);
 
 
     const toggleModule = (index) => {
@@ -176,15 +190,17 @@ const NewScan = ({ navigate }) => {
             body: "", // Ensure body field exists
             // [NEW] Configuration
             modules: activeScanModules.filter(m => m.selected).map(m => m.name),
-            filters: interceptionFilters.filter(f => f.selected).map(f => f.name)
+            filters: interceptionFilters.filter(f => f.selected).map(f => f.name),
+            duration: activeScanModules.filter(m => m.selected).length >= 5 ? 240 : 180
         };
 
         setIsLaunching(true);
+        const backendHost = '127.0.0.1:8000';
 
         try {
             console.log("Launching scan with payload:", payload);
             // DIRECT LINK TO CORTEX ORCHESTRATOR
-            const response = await fetch("http://127.0.0.1:8000/api/attack/fire", {
+            const response = await fetch(`http://${backendHost}/api/attack/fire`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -204,7 +220,10 @@ const NewScan = ({ navigate }) => {
             navigate('scans');
         } catch (err) {
             console.error("Fetch Error:", err);
-            alert("Failed to launch scan: " + err.message);
+            const msg = err.message === 'Failed to fetch'
+                ? "Backend is offline. Please ensure the Antigravity Terminal is running on port 8000."
+                : err.message;
+            alert("Failed to launch scan: " + msg);
         } finally {
             setIsLaunching(false);
         }

@@ -1,12 +1,12 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
-from backend.ai.gi5 import GI5Engine
+from backend.ai.cortex import CortexEngine
 from backend.core.orchestrator import HiveOrchestrator
 
 # Initialize Router
 router = APIRouter()
-brain = GI5Engine()
+brain = CortexEngine()
 
 class MutationRequest(BaseModel):
     url: str
@@ -39,7 +39,7 @@ async def engage_autonomous(payload: MutationRequest, background_tasks: Backgrou
     scan_id = "HIVE-" + payload.url.replace("https://", "").replace("http://", "")[:10]
     
     # Pass full payload to the Hive Orchestrator
-    background_tasks.add_task(HiveOrchestrator.bootstrap_hive, payload.dict(), scan_id)
+    background_tasks.add_task(HiveOrchestrator.bootstrap_hive, payload.model_dump(), scan_id)
     
     return {
         "status": "launched", 

@@ -98,7 +98,18 @@ class GeneralIntelligence5:
     }
     
     # Zero-width and invisible characters
-    INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\u200e\u200f\uFEFF\u00AD\u034F\u2060\u2061\u2062\u2063\u2064\u0000-\u001F]')
+    INVISIBLE_CHARS = re.compile(r'[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad\u034f\u2060\u2061\u2062\u2063\u2064\u0000-\u001f]')
+
+    # PII / Sensitive Data Patterns
+    PII_PATTERNS = {
+        "SSN": re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),
+        "EMAIL": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+        "CREDIT_CARD": re.compile(r'\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})\b'),
+        "API_KEY": re.compile(r'\b(?:sk|pk|key|secret|token)[-_]?[a-zA-Z0-9]{16,64}\b', re.IGNORECASE),
+        "JWT": re.compile(r'eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'),
+        "DOCKER_CONFIG": re.compile(r'docker-config-hash:[a-fA-F0-9]{40,64}'),
+        "AWS_KEY": re.compile(r'AKIA[0-9A-Z]{16}'),
+    }
 
     def __init__(self):
         """Initialize the OMEGA Engine."""
@@ -406,6 +417,26 @@ class GeneralIntelligence5:
         score = 100 / (1 + math.exp(-self.sigmoid_steepness * (total_weight - 40)))
         
         return int(min(score, 100))
+
+    def analyze_sensitivity(self, text: str) -> List[str]:
+        """
+        Deterministic Sensitivity Analysis (PII/Secret Detection).
+        Uses high-speed regex patterns to find common sensitive data types.
+        """
+        if not text:
+            return []
+        
+        detected = []
+        # Scan variants for deobfuscated PII
+        clean = self._sanitize_input(text)
+        variants = self._heuristic_crack(clean)
+        
+        all_text = " ".join(variants)
+        for label, pattern in self.PII_PATTERNS.items():
+            if pattern.search(all_text):
+                detected.append(label)
+        
+        return detected
 
     # ═══════════════════════════════════════════════════════════════════════════
     # MASTER PROCESSOR: UNIFIED THREAT ASSESSMENT

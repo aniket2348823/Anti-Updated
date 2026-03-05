@@ -162,3 +162,9 @@ async def login(payload: LoginRequest):
 async def logout():
     session_state["authenticated"] = False
     return {"status": "success"}
+
+@router.post("/reset")
+async def reset_dashboard():
+    from backend.core.state import stats_db_manager
+    stats_db_manager.wipe_scans()
+    return {"status": "success", "message": "All historical scans have been wiped."}

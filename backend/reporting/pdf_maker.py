@@ -181,15 +181,14 @@ class ForensicReport(FPDF):
         self.cell(0, 10, "EXECUTIVE SUMMARY (AI ANALYSIS)", ln=1)
         
         summary = None
-        if gemini_key:
-            try:
-                from backend.ai.cortex import CortexEngine
-                cortex = CortexEngine(api_key=gemini_key)
-                target = job_data.get('target', 'Unknown')
-                success_count = sum(1 for r in results if isinstance(r, dict) and str(r.get('status', '')).startswith('2'))
-                summary = cortex.generate_executive_brief(target, success_count, len(results), "0.0")
-            except Exception as e:
-                print(f"AI Generation Failed: {e}")
+        try:
+            from backend.ai.cortex import CortexEngine
+            cortex = CortexEngine()
+            target = job_data.get('target', 'Unknown')
+            success_count = sum(1 for r in results if isinstance(r, dict) and str(r.get('status', '')).startswith('2'))
+            summary = cortex.generate_executive_brief(target, success_count, len(results), "0.0")
+        except Exception as e:
+            print(f"AI Generation Failed: {e}")
 
         if not summary:
             # Fallback
@@ -222,12 +221,11 @@ class ForensicReport(FPDF):
 
         # Initialize Cortex if key available
         cortex = None
-        if gemini_key:
-            try:
-                from backend.ai.cortex import CortexEngine
-                cortex = CortexEngine(api_key=gemini_key)
-            except:
-                pass
+        try:
+            from backend.ai.cortex import CortexEngine
+            cortex = CortexEngine()
+        except:
+            pass
 
         # Try to detect if 'results' is the new variant list or old socket list
         # New structure has 'variant' key
@@ -261,11 +259,11 @@ class ForensicReport(FPDF):
                 analysis = "AI Analysis Pending..."
                 if cortex:
                     analysis = cortex.analyze_payload_variant(variant, payload, verdict)
-                elif gemini_key:
-                    # Upgrade to V12 Truth Kernel if applicable
+                else:
+                    # Fallback to Hybrid CortexEngine (GI5 + Granite)
                     try:
-                        from backend.ai.gi5 import GI5Engine
-                        gi5 = GI5Engine(api_key=gemini_key)
+                        from backend.ai.cortex import CortexEngine
+                        hybrid = CortexEngine()
                         vuln_data = {
                             "target": job_data.get('target'),
                             "payload": payload,
@@ -273,14 +271,12 @@ class ForensicReport(FPDF):
                             "status": res.get('status'),
                             "variant": variant
                         }
-                        analysis = gi5.generate_forensic_report_block(vuln_data)
+                        analysis = hybrid.generate_forensic_report_block(vuln_data)
                         if "::TITLE_START::" in analysis:
                             self.add_forensic_truth_kernel_section(analysis)
                             continue # Skip the legacy small box if V12 succeeds
                     except Exception as e:
                         analysis = f"V12 Upgrade Failed: {e}"
-                else:
-                    analysis = "AI Analysis Unavailable (Key missing)."
                 
                 self.multi_cell(0, 5, f"AI Insight: {analysis}")
                 self.ln(5)
@@ -380,15 +376,13 @@ class ForensicReport(FPDF):
             self.cell(0, 10, "AI INSIGHTS", ln=1)
             
             summary = None
-            if gemini_key:
-                try:
-                    # Creating new cortex instance per target might be slow, but safe
-                    from backend.ai.cortex import CortexEngine
-                    cortex = CortexEngine(api_key=gemini_key)
-                    success_count = sum(1 for r in scan['results'] if isinstance(r, dict) and str(r.get('status', '')).startswith('2'))
-                    summary = cortex.generate_executive_brief(target_title, success_count, len(scan['results']), "0.0")
-                except:
-                    pass
+            try:
+                from backend.ai.cortex import CortexEngine
+                cortex = CortexEngine()
+                success_count = sum(1 for r in scan['results'] if isinstance(r, dict) and str(r.get('status', '')).startswith('2'))
+                summary = cortex.generate_executive_brief(target_title, success_count, len(scan['results']), "0.0")
+            except:
+                pass
             
             if not summary:
                  summary = "AI Analysis unavailable or skipped for batch processing."

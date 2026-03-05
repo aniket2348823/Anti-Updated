@@ -1,7 +1,14 @@
+# Hybrid AI Engine
+from backend.ai.cortex import CortexEngine
+
+cortex = CortexEngine()
+
 class CVSSCalculator:
-    def __init__(self, success_count: int, body_content: str = ""):
+    def __init__(self, success_count: int, body_content: str = "", target_url: str = "", vuln_type: str = ""):
         self.success_count = success_count
         self.body_content = body_content.lower()
+        self.target_url = target_url
+        self.vuln_type = vuln_type
 
     def calculate(self):
         # Base Metrics
@@ -43,3 +50,11 @@ class CVSSCalculator:
             score = 0.0 # None
             
         return score, vector
+
+    async def calculate_hybrid(self):
+        """Calculate CVSS with AI-powered contextual adjustment."""
+        base_score, vector = self.calculate()
+        if self.target_url and self.vuln_type:
+            adjusted = await cortex.adjust_cvss_score(base_score, self.vuln_type, self.target_url)
+            return adjusted, vector
+        return base_score, vector

@@ -9,3 +9,15 @@ coverage/
 .DS_Store
 .env
 venv/
+
+# Antigravity specific
+reports/
+*.pdf
+stats.json
+test_*.py
+verify_*.py
+manual_launch.py
+keyring.json
+brain/
+*.txt
+testsprite_tests/

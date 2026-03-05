@@ -16,15 +16,23 @@ async def fire_attack(payload: AttackPayload, background_tasks: BackgroundTasks)
     """
     scan_id = str(uuid.uuid4())
     
-    # 1. Prepare Configuration
+    import json
+    parsed_body = {}
+    if payload.body:
+        try:
+            parsed_body = json.loads(payload.body)
+        except Exception:
+            parsed_body = payload.body # Fallback if not JSON string
+
     target_config = {
         "url": payload.target_url,
         "method": payload.method,
         "headers": payload.headers,
-        "payload": payload.body, # Original body for Tycoon/Escalator
+        "payload": parsed_body, # Original body for Tycoon/Escalator
         "velocity": payload.velocity,
         "modules": payload.modules,
-        "filters": payload.filters
+        "filters": payload.filters,
+        "duration": payload.duration
     }
     
     # 2. Initial DB Registration (Orchestrator updates this too, but we reserve the slot)

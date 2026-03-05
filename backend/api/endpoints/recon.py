@@ -21,7 +21,7 @@ async def ingest_recon_data(payload: ReconPayload):
     Receives traffic from the Chrome Extension (Spy).
     Passthrough to UI + Logic.
     """
-    packet_data = payload.dict()
+    packet_data = payload.model_dump()
     
     # GAP FIX: Ingest V12 Scanner Findings into Kappa's Memory (The Brain)
     headers = packet_data.get("headers", {})
@@ -84,7 +84,7 @@ async def ingest_keys(payload: KeyringPayload):
     Receives sensitive headers (keys) from the Chrome Extension.
     Stores them in a persistent keyring.
     """
-    data = payload.dict()
+    data = payload.model_dump()
     keyring = []
     
     if os.path.exists(KEYRING_FILE):

@@ -5,7 +5,9 @@ import random
 from typing import List, Dict, Any
 from collections import deque
 from backend.core.hive import BaseAgent, EventType, HiveEvent
-from backend.core.protocol import JobPacket  
+from backend.core.protocol import JobPacket
+# Hybrid AI Engine
+from backend.ai.cortex import CortexEngine
 
 class ZetaAgent(BaseAgent):
     """
@@ -29,6 +31,8 @@ class ZetaAgent(BaseAgent):
         self.last_budget_refill = time.time()
         
         self.priority_queue = {0: [], 1: [], 2: []}
+        # Hybrid AI Engine for stress analysis
+        self.cortex = CortexEngine()
 
     async def setup(self):
         self.bus.subscribe(EventType.JOB_COMPLETED, self.handle_job_completion)
@@ -42,13 +46,23 @@ class ZetaAgent(BaseAgent):
             is_error = not payload["success"] 
             self.error_window.append(is_error)
             
-            # SOTA: SENTIMENT ANALYSIS
-            # Analyze error messages for "Stress" keywords
+            # HYBRID AI: Deep Server Stress Analysis
             if is_error and "data" in payload:
-                 error_msg = str(payload["data"]).lower()
-                 if "timeout" in error_msg or "overload" in error_msg:
-                     print(f"[{self.name}] 😓 Server Sentiment: STRESSED (Timeout Detected)")
-                     self.error_budget_current -= 5 # High penalty for stress
+                 error_msg = str(payload["data"])
+                 stress_analysis = await self.cortex.analyze_server_stress(error_msg)
+                 stress_level = stress_analysis.get("stress_level", "NORMAL")
+                 indicators = stress_analysis.get("indicators", [])
+                 action = stress_analysis.get("recommended_action", "CONTINUE")
+                 
+                 if stress_level in ["HIGH", "MEDIUM"]:
+                     penalty = 10 if stress_level == "HIGH" else 5
+                     self.error_budget_current -= penalty
+                     print(f"[{self.name}] 😓 Server Sentiment: {stress_level} (AI: {indicators}) → Action: {action}")
+                     
+                     if action == "ABORT":
+                         await self.broadcast_signal("STEALTH_MODE", {"reason": f"AI: Server Stress {stress_level}"})
+                     elif action == "THROTTLE":
+                         await self.broadcast_signal("THROTTLE", {"level": "HIGH", "reason": f"AI: {indicators}"})
 
     async def lifecycle(self):
         while self.active:

@@ -7,6 +7,7 @@ import asyncio
 from typing import Dict, List, Any
 from backend.core.hive import BaseAgent, EventType, HiveEvent
 from backend.core.protocol import JobPacket, ResultPacket, AgentID, Vulnerability, TaskPriority
+from backend.ai.cortex import CortexEngine
 
 class AgentTheta(BaseAgent):
     """
@@ -19,7 +20,13 @@ class AgentTheta(BaseAgent):
         super().__init__("agent_theta", bus) # AgentID.THETA
         self.name = "agent_theta"
         
-        # Knowledge Base: Prompt Injection Signatures
+        # CORTEX AI Engine (Local Ollama)
+        try:
+            self.ai = CortexEngine()
+        except:
+            self.ai = None
+        
+        # Knowledge Base: Prompt Injection Signatures (regex fallback)
         self.injection_patterns = [
             r"ignore previous instructions",
             r"system override",
@@ -55,22 +62,26 @@ class AgentTheta(BaseAgent):
         dom_content = packet.target.payload or {}
         analysis_result = self.analyze_dom(dom_content)
         
-        # If threat detected, publish VULN_CONFIRMED
+        # If threat detected, publish VULN_CONFIRMED for EACH type
         if analysis_result["risk_score"] > 50:
-             print(f"[{self.name}] 👁️ THREAT DETECTED: {analysis_result['threat_type']} (Risk: {analysis_result['risk_score']})")
+             detected_types = []
+             if "Injection" in analysis_result['threat_type']: detected_types.append("PROMPT_INJECTION")
+             if "Invisible" in analysis_result['threat_type']: detected_types.append("HIDDEN_TEXT")
              
-             # Broadcast for Dashboard & Visual Alert
-             await self.bus.publish(HiveEvent(
-                type=EventType.VULN_CONFIRMED,
-                source=self.name,
-                payload={
-                    "type": "PROMPT_INJECTION" if "Injection" in analysis_result['threat_type'] else "HIDDEN_TEXT",
-                    "url": packet.target.url,
-                    "severity": "High" if analysis_result["risk_score"] > 80 else "Medium",
-                    "data": analysis_result, # Contains details for Red Border
-                    "description": f"Sentinel detected {analysis_result['threat_type']}"
-                }
-             ))
+             for t_type in detected_types:
+                 print(f"[{self.name}] 👁️ THREAT DETECTED: {t_type}")
+                 # Broadcast for Dashboard & Visual Alert
+                 await self.bus.publish(HiveEvent(
+                    type=EventType.VULN_CONFIRMED,
+                    source=self.name,
+                    payload={
+                        "type": t_type,
+                        "url": packet.target.url,
+                        "severity": "High" if analysis_result["risk_score"] > 80 else "Medium",
+                        "data": analysis_result,
+                        "description": f"Sentinel detected {t_type.replace('_', ' ').title()}"
+                    }
+                 ))
 
         # Always complete the job
         await self.bus.publish(HiveEvent(
@@ -86,32 +97,46 @@ class AgentTheta(BaseAgent):
     def analyze_dom(self, dom: Dict[str, Any]) -> Dict[str, Any]:
         """
         Calculates VisibilityScore and InjectionRiskScore.
+        Uses AI for semantic analysis + regex for known patterns.
         """
         risk_score = 0
         threats = []
         
         # 1. Invisible Text Detection
-        # Check suspicious styles
         opacity = float(dom.get("style", {}).get("opacity", 1.0))
         font_size = dom.get("style", {}).get("fontSize", "12px")
         z_index = int(dom.get("style", {}).get("zIndex", 0))
         text = dom.get("innerText", "")
         
         if opacity < 0.1 or z_index < -1000 or font_size == "0px":
-             if len(text) > 5: # Ignore empty hidden divs
+             if len(text) > 5:
                  risk_score += 60
                  threats.append("Invisible Content Overlay")
 
-        # 2. Prompt Injection Scanning
+        # 2. Regex-Based Injection Scanning (fast, known patterns)
         for pattern in self.injection_patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 risk_score += 90
                 threats.append(f"Prompt Injection Signature: {pattern}")
+
+        # 3. CORTEX AI: Semantic Injection Detection (catches novel attacks)
+        if self.ai and self.ai.enabled and len(text) > 10:
+            try:
+                ai_verdict = self.ai.detect_prompt_injection(text)
+                if ai_verdict.get("is_injection"):
+                    ai_risk = ai_verdict.get("risk_score", 50)
+                    technique = ai_verdict.get("technique", "Unknown")
+                    risk_score = max(risk_score, ai_risk)
+                    if technique not in str(threats):
+                        threats.append(f"AI-Detected: {technique}")
+                    print(f"[{self.name}] CORTEX AI: Injection detected - {technique} (risk={ai_risk})")
+            except Exception as e:
+                pass  # Don't let AI failure break the scan
                 
         return {
             "risk_score": min(risk_score, 100),
             "threat_type": ", ".join(threats) if threats else "Clean",
-            "element_api_id": dom.get("antigravity_id") # For frontend highlighting
+            "element_api_id": dom.get("antigravity_id")
         }
 
     async def execute_task(self, packet):
@@ -129,27 +154,31 @@ class AgentTheta(BaseAgent):
         
         if analysis_result["risk_score"] > 50:
             status = "THREAT_BLOCKED"
-            threat_type = "PROMPT_INJECTION" if "Injection" in analysis_result['threat_type'] else "HIDDEN_TEXT"
-            vulnerabilities.append(Vulnerability(
-                name=threat_type,
-                severity="High" if analysis_result["risk_score"] > 80 else "Medium",
-                description=f"Sentinel detected {analysis_result['threat_type']}",
-                evidence=f"Risk Score: {analysis_result['risk_score']}",
-                remediation="Remove hidden or malicious content from the page."
-            ))
+            detected_types = []
+            if "Injection" in analysis_result['threat_type']: detected_types.append("PROMPT_INJECTION")
+            if "Invisible" in analysis_result['threat_type']: detected_types.append("HIDDEN_TEXT")
             
-            # Also broadcast to EventBus for Dashboard
-            await self.bus.publish(HiveEvent(
-                type=EventType.VULN_CONFIRMED,
-                source=self.name,
-                payload={
-                    "type": threat_type,
-                    "url": packet.target.url,
-                    "severity": vulnerabilities[0].severity,
-                    "data": analysis_result,
-                    "description": vulnerabilities[0].description
-                }
-            ))
+            for t_type in detected_types:
+                vulnerabilities.append(Vulnerability(
+                    name=t_type,
+                    severity="High" if analysis_result["risk_score"] > 80 else "Medium",
+                    description=f"Sentinel detected {t_type.replace('_', ' ').title()}",
+                    evidence=f"Risk Score: {analysis_result['risk_score']}",
+                    remediation="Remove hidden or malicious content from the page."
+                ) if t_type else None)
+                
+                # Also broadcast to EventBus for Dashboard
+                await self.bus.publish(HiveEvent(
+                    type=EventType.VULN_CONFIRMED,
+                    source=self.name,
+                    payload={
+                        "type": t_type,
+                        "url": packet.target.url,
+                        "severity": "High" if analysis_result["risk_score"] > 80 else "Medium",
+                        "data": analysis_result,
+                        "description": f"Sentinel detected {t_type.replace('_', ' ').title()}"
+                    }
+                ))
         
         return ResultPacket(
             job_id=packet.id if hasattr(packet, 'id') else "unknown",

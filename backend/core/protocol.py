@@ -34,6 +34,7 @@ class ModuleConfig(BaseModel):
     aggression: int = Field(5, ge=1, le=10)
     ai_mode: bool = True    # Use advanced AI features?
     session_id: Optional[str] = None # V6: Session Persistence
+    params: Dict[str, Any] = Field(default_factory=dict)
 
 class TaskTarget(BaseModel):
     url: str

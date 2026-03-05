@@ -1,6 +1,5 @@
 // Antigravity Spy V2 - Background Service Worker
 // Modules: Synapse (Key Capture) + Traffic Interception + Aegis (Active Defense)
-importScripts('background/active_defense.js');
 
 // ============================================================================
 // CONFIGURATION
@@ -8,6 +7,47 @@ importScripts('background/active_defense.js');
 
 const BACKEND_URL = "http://127.0.0.1:8000";
 const WS_ENDPOINT = "ws://127.0.0.1:8000/stream?client_type=spy";
+
+// ============================================================================
+// BACKEND HEALTH GUARD (Triple-Shield)
+// ============================================================================
+
+let isBackendAlive = true;
+const HEALTH_CHECK_INTERVAL = 10000; // 10s heartbeat
+
+async function checkBackendHealth() {
+    try {
+        const res = await fetch(`${BACKEND_URL}/api/health`, { method: 'GET', cache: 'no-store' });
+        isBackendAlive = res.ok;
+    } catch (e) {
+        isBackendAlive = false;
+    }
+}
+
+/**
+ * SafeFetch: Prevents "Failed to fetch" spam by checking backend status first.
+ * Silences network errors to keep the console clean in production.
+ */
+async function safeFetch(url, options = {}) {
+    if (!isBackendAlive && !url.includes('/api/health')) {
+        return { ok: false, status: 0, error: "Backend offline" };
+    }
+
+    try {
+        const response = await fetch(url, options);
+        if (!isBackendAlive && response.ok) isBackendAlive = true; // Recovery
+        return response;
+    } catch (err) {
+        if (isBackendAlive) {
+            console.warn("[TRAFFIC] First-contact failure. Backend might have dropped.");
+            isBackendAlive = false;
+        }
+        return { ok: false, status: 0, error: err.message };
+    }
+}
+
+// NOW Import active defense which depends on safeFetch
+importScripts('background/active_defense.js');
 
 // Filter out static assets
 const IGNORE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.css', '.js', '.woff', '.woff2', '.ttf', '.svg', '.ico'];
@@ -44,11 +84,66 @@ function extractSensitiveHeaders(requestHeaders) {
     return captured;
 }
 
+// ============================================================================
+// OFFLINE QUEUE MECHANISM
+// ============================================================================
+
+let isFlushingQueue = false;
+
+function enqueuePayload(url, options) {
+    chrome.storage.local.get(['spyOfflineQueue'], (data) => {
+        let queue = data.spyOfflineQueue || [];
+        if (queue.length > 500) {
+            queue.shift(); // Hard cap to prevent memory leak
+        }
+        queue.push({ url, options });
+        chrome.storage.local.set({ spyOfflineQueue: queue }, () => {
+            if (!isFlushingQueue && isBackendAlive) flushOfflineQueue();
+        });
+    });
+}
+
+async function flushOfflineQueue() {
+    if (!isBackendAlive) {
+        isFlushingQueue = false;
+        return;
+    }
+    isFlushingQueue = true;
+    chrome.storage.local.get(['spyOfflineQueue'], async (data) => {
+        let queue = data.spyOfflineQueue || [];
+        if (queue.length === 0) {
+            isFlushingQueue = false;
+            return;
+        }
+
+        const item = queue[0];
+        try {
+            const res = await fetch(item.url, item.options);
+            if (res.ok) {
+                // Success: remove item from queue
+                queue.shift();
+                chrome.storage.local.set({ spyOfflineQueue: queue }, () => {
+                    setTimeout(flushOfflineQueue, 100);
+                });
+            } else {
+                // Server returned error, backoff
+                isFlushingQueue = false;
+                setTimeout(flushOfflineQueue, 5000);
+            }
+        } catch (err) {
+            // Failed: backend still offline, backoff
+            isBackendAlive = false;
+            isFlushingQueue = false;
+            setTimeout(flushOfflineQueue, 5000); // 5 sec heartbeat
+        }
+    });
+}
+
 async function sendCapturedKeys(url, keys) {
     if (Object.keys(keys).length === 0) return;
 
     try {
-        await fetch(`${BACKEND_URL}/api/recon/keys`, {
+        await safeFetch(`${BACKEND_URL}/api/recon/keys`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -67,7 +162,12 @@ async function sendCapturedKeys(url, keys) {
 
         console.log("[SYNAPSE] Keys captured from:", url);
     } catch (err) {
-        console.error("[SYNAPSE] Failed to send keys:", err);
+        console.warn("[SYNAPSE] Backend offline, queuing keys:", err.message);
+        enqueuePayload(`${BACKEND_URL}/api/recon/keys`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url, keys: keys, timestamp: Date.now() / 1000 })
+        });
     }
 }
 
@@ -78,21 +178,26 @@ async function sendCapturedKeys(url, keys) {
 async function sendScanResults(results) {
     if (!results || !results.findings || results.findings.length === 0) return;
 
+    const payloadStr = JSON.stringify({
+        url: results.meta.url,
+        method: "SCAN",
+        headers: { "x-scanner": "v12-engine" },
+        timestamp: results.meta.timestamp / 1000,
+        payload: results // Send full structure
+    });
+
+    const requestOptions = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payloadStr
+    };
+
     try {
-        await fetch(`${BACKEND_URL}/api/recon/ingest`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                url: results.meta.url,
-                method: "SCAN",
-                headers: { "x-scanner": "v12-engine" },
-                timestamp: results.meta.timestamp / 1000,
-                payload: results // Send full structure
-            })
-        });
+        await safeFetch(`${BACKEND_URL}/api/recon/ingest`, requestOptions);
         console.log("[SPY V2] Scanner Engine results relayed.");
     } catch (err) {
-        console.error("[SPY V2] Failed to relay scan results:", err);
+        console.warn("[SPY V2] Backend offline, queuing scan results.");
+        enqueuePayload(`${BACKEND_URL}/api/recon/ingest`, requestOptions);
     }
 }
 
@@ -104,30 +209,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     // 2. DEFENSE SHIELD (Agent Prism & Chi)
-    if (message.type === "ANALYZE_THREAT") {
-        console.log("[BACKGROUND] Relaying threat to Hive:", message.payload);
+    if (message.type === "ANALYZE_THREAT" || message.type === "FORWARD_REQ") {
+        const endpoint = message.type === "ANALYZE_THREAT"
+            ? "http://127.0.0.1:8000/api/defense/analyze"
+            : message.payload.endpoint;
 
-        // 1. Send Data to Python Backend
-        fetch("http://127.0.0.1:8000/api/defense/analyze", {
+        const body = message.type === "ANALYZE_THREAT"
+            ? message.payload
+            : message.payload.body;
+
+        console.log(`[BACKGROUND] Relaying ${message.type} to:`, endpoint);
+
+        safeFetch(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(message.payload)
+            body: JSON.stringify(body)
         })
-            .then(res => res.json())
-            .then(response => {
-                console.log("[BACKGROUND] Hive Verdict:", response);
-                if (response.verdict === "BLOCK") {
-                    // 2. If Backend says BLOCK, notify the user
-                    chrome.scripting.executeScript({
-                        target: { tabId: sender.tab.id },
-                        func: showBlockNotification,
-                        args: [response.reason]
-                    });
+            .then(res => {
+                if (res && res.ok && typeof res.json === 'function') {
+                    return res.json();
                 }
+                return { success: false, error: "Backend unparseable or offline" };
             })
-            .catch(err => console.error("Hive Disconnected:", err));
+            .then(response => {
+                if (message.type === "ANALYZE_THREAT") {
+                    console.log("[BACKGROUND] Hive Verdict:", response);
+                    if (response.verdict === "BLOCK") {
+                        chrome.scripting.executeScript({
+                            target: { tabId: sender.tab.id },
+                            func: showBlockNotification,
+                            args: [response.reason]
+                        });
+                    }
+                }
+                sendResponse({ success: true, data: response });
+            })
+            .catch(err => {
+                console.warn("[BACKGROUND] Relay Failed:", err.message);
+                sendResponse({ success: false, error: err.message });
+            });
 
-        return true;
+        return true; // Keep channel open for async response
     }
 });
 
@@ -160,36 +282,8 @@ function shouldCapture(details) {
 }
 
 // ============================================================================
-// WEBSOCKET CONNECTION
+// WEBSOCKET CONNECTION (REMOVED: Native Uncatchable Errors / Replaced by Fetch)
 // ============================================================================
-
-let socket = null;
-
-function connectWebSocket() {
-    socket = new WebSocket(WS_ENDPOINT);
-
-    socket.onopen = () => {
-        console.log("[SPY V2] Connected to Backend Stream");
-    };
-
-    socket.onclose = () => {
-        console.log("[SPY V2] Disconnected. Retrying in 2s...");
-        setTimeout(connectWebSocket, 2000);
-    };
-
-    socket.onerror = (err) => {
-        console.error("[SPY V2] WebSocket Error:", err);
-        socket.close();
-    };
-
-    socket.onmessage = (event) => {
-        // Handle commands from backend if needed
-        console.log("[SPY V2] Message:", event.data);
-    };
-}
-
-// Start WebSocket
-connectWebSocket();
 
 // ============================================================================
 // REQUEST LISTENER
@@ -222,11 +316,17 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
             timestamp: Date.now() / 1000
         };
 
-        fetch(`${BACKEND_URL}/api/recon/ingest`, {
+        const payloadStr = JSON.stringify(packet);
+        const reqOptions = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(packet)
-        }).catch(err => console.log("[SPY V2] Relay failed:", err));
+            body: payloadStr
+        };
+
+        safeFetch(`${BACKEND_URL}/api/recon/ingest`, reqOptions).catch(err => {
+            console.log("[SPY V2] Relay failed, queuing recon packet.");
+            enqueuePayload(`${BACKEND_URL}/api/recon/ingest`, reqOptions);
+        });
 
         // Synapse: Send captured keys
         sendCapturedKeys(details.url, capturedKeys);

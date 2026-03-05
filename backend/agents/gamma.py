@@ -1,11 +1,12 @@
 import asyncio
 import difflib
 import random
+import collections
 from backend.core.hive import BaseAgent, EventType, HiveEvent
-from backend.core.protocol import JobPacket, ResultPacket, AgentID, TaskPriority
-# Import Modules
-from backend.modules.logic.tycoon import TheTycoon
-from backend.modules.logic.doppelganger import Doppelganger
+from backend.core.protocol import JobPacket, ResultPacket, AgentID, TaskPriority, ModuleConfig
+from backend.core.hyper_hive import negotiator
+# Hybrid AI Engine
+from backend.ai.cortex import CortexEngine
 
 class GammaAgent(BaseAgent):
     """
@@ -17,14 +18,17 @@ class GammaAgent(BaseAgent):
     """
     def __init__(self, bus):
         super().__init__("agent_gamma", bus)
-        self.arsenal = {
-            "logic_tycoon": TheTycoon(),
-            "logic_doppelganger": Doppelganger()
-        }
-        self.baseline_cache = {}
+        # Arsenal stripped. Gamma is now purely a tactical router.
+        # Hybrid AI Engine for anomaly classification
+        self.cortex = CortexEngine()
 
     async def setup(self):
         self.bus.subscribe(EventType.JOB_ASSIGNED, self.handle_job)
+        self.bus.subscribe(EventType.CONTROL_SIGNAL, self.handle_control)
+
+    async def handle_control(self, event: HiveEvent):
+        """Purge scan-scoped memory when the scan completes. Handled natively by ScanContext now."""
+        pass
 
     async def handle_job(self, event: HiveEvent):
         # ... (Argument parsing)
@@ -38,6 +42,18 @@ class GammaAgent(BaseAgent):
 
         print(f"[{self.name}] Auditing Job {packet.id}")
 
+        # BROADCAST AUDIT ACTIVITY
+        await self.bus.publish(HiveEvent(
+            type=EventType.LIVE_ATTACK,
+            source=self.name,
+            payload={
+                "url": packet.target.url,
+                "arsenal": "Logic Auditor",
+                "action": "Analyzing behavioral anomalies",
+                "payload": "Heuristic Audit Pass"
+            }
+        ))
+
         # Cyber-Organism Protocol: Verification Mode
         # If this is a re-scan request (e.g. from Beta finding), we lower aggression
         if packet.config.aggression > 5 and packet.priority == TaskPriority.CRITICAL:
@@ -45,42 +61,28 @@ class GammaAgent(BaseAgent):
             packet.config.aggression = 1 
         
         # SOTA: ANOMALY DIFFING
-        # If we have a baseline response, compare it
-        baseline = self.baseline_cache.get(packet.target.url)
+        # If we have a baseline response, compare it (isolated by scan_id)
+        scan_id = packet.config.session_id or "default_scan"
+        ctx = self.bus.get_or_create_context(scan_id)
+        if "gamma_baselines" not in ctx.baseline_cache:
+            ctx.baseline_cache["gamma_baselines"] = {}
+        baseline = ctx.baseline_cache["gamma_baselines"].get(packet.target.url)
         
-        module_id = packet.config.module_id
-        if module_id in self.arsenal:
-            module = self.arsenal[module_id]
-            result = await module.execute(packet)
-            
-            # Post-Execution Analysis
-            # If ResultPacket contains data, we diff it against baseline
-            if result.data and "raw_response" in result.data:
-                response_text = result.data["raw_response"]
-                if not baseline:
-                    # First run is baseline
-                    self.baseline_cache[packet.target.url] = response_text
-                else:
-                    # Compare
-                    similarity = difflib.SequenceMatcher(None, baseline, response_text).ratio()
-                    if similarity < 0.95 and similarity > 0.5:
-                        # Subtle change detected (Not a 404, but different content)
-                        print(f"[{self.name}] [DIFF] ANOMALY DETECTED (Sim: {similarity:.2f}). Possible Leak.")
-                        
-                        await self.bus.publish(HiveEvent(
-                            type=EventType.VULN_CONFIRMED,
-                            source=self.name,
-                            payload={
-                                "type": "LOGIC_ANOMALY",
-                                "id": f"AG-{random.randint(10,99)}", 
-                                "url": packet.target.url,
-                                "similarity": similarity,
-                                "payload": packet.target.payload
-                            }
-                        ))
-            
-            await self.bus.publish(HiveEvent(
-                type=EventType.JOB_COMPLETED,
-                source=self.name,
-                payload=result.dict()
-            ))
+        print(f"[{self.name}] Delegating {packet.config.module_id} to SIGMA Orchestrator on {packet.target.url}")
+        
+        sigma_job = JobPacket(
+            priority=packet.priority,
+            target=packet.target,
+            config=ModuleConfig(
+                module_id=packet.config.module_id, 
+                agent_id=AgentID.SIGMA, 
+                params=packet.config.params,
+                aggression=packet.config.aggression,
+                session_id=scan_id
+            )
+        )
+        await self.bus.publish(HiveEvent(
+            type=EventType.JOB_ASSIGNED,
+            source=self.name,
+            payload=sigma_job.model_dump()
+        ))

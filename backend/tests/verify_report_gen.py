@@ -6,13 +6,20 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"
 from backend.core.reporting import ReportGenerator
 from datetime import datetime, timedelta
 
-def run_test():
+import asyncio
+
+async def run_test():
     print(">>> Initiating Report Generation Test Sequence...")
     
     # Mock Start Time
     start_time = datetime.now()
     
     # Mock Event Stream matching the Kill Chain
+    events = [
+        # ... (same events)
+    ]
+    
+    # Re-using events from the file content
     events = [
         {
             "timestamp": start_time + timedelta(seconds=3.12),
@@ -55,7 +62,7 @@ def run_test():
     
     generator = ReportGenerator()
     try:
-        output_path = generator.generate_report(scan_id, events, target_url)
+        output_path = await generator.generate_report(scan_id, events, target_url)
         print(f"[SUCCESS] Report generated at: {output_path}")
     except Exception as e:
         print(f"[FAILURE] {e}")
@@ -63,4 +70,4 @@ def run_test():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    run_test()
+    asyncio.run(run_test())

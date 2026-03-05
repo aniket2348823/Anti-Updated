@@ -1,12 +1,18 @@
 import json
 import os
+import asyncio
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Any
 
 STATE_FILE = "stats.json"
+TMP_STATE_FILE = "stats.json.tmp"
 
 class StateManager:
     def __init__(self):
+        self._dirty = False
+        self._task = None
+        self._lock = asyncio.Lock()
         self._stats = {
             "scans": [],
             "active_scans": 0,
@@ -21,6 +27,7 @@ class StateManager:
                 "risk_score": 0
             }
         }
+        self._seen_signatures = {} # {scan_id: set(signatures)}
         self._load()
         
     def _load(self):
@@ -36,12 +43,42 @@ class StateManager:
             except Exception as e:
                 print(f"[StateManager] Load Error: {e}")
 
-    def _save(self):
+    async def _background_writer(self):
+        while True:
+            await asyncio.sleep(2.0)
+            if self._dirty:
+                async with self._lock:
+                    self._save_sync()
+
+    def _mark_dirty(self):
+        self._dirty = True
         try:
-            with open(STATE_FILE, "w") as f:
-                json.dump(self._stats, f, indent=4)
+            loop = asyncio.get_running_loop()
+            if self._task is None or self._task.done():
+                self._task = loop.create_task(self._background_writer())
+        except RuntimeError:
+            self.flush_immediate()
+
+    def flush_immediate(self):
+        """Immediately force-save state to disk (Critical for report readiness)."""
+        asyncio.run_coroutine_threadsafe(self._async_save(), asyncio.get_event_loop()) if self._task else self._save_sync()
+
+    async def _async_save(self):
+        async with self._lock:
+            self._save_sync()
+
+    def _save_sync(self):
+        try:
+            with open(TMP_STATE_FILE, "w") as f:
+                json.dump(self._stats, f, indent=4, default=str)
+            os.replace(TMP_STATE_FILE, STATE_FILE)
+            self._dirty = False
         except Exception as e:
             print(f"[StateManager] Save Error: {e}")
+
+    # Aliasing remaining references to old _save()
+    def _save(self):
+        self._mark_dirty()
 
     def get_stats(self):
         return self._stats
@@ -52,8 +89,21 @@ class StateManager:
         self._stats["total_scans"] += 1
         self._save()
 
-    def record_finding(self, severity: str = "Medium"):
-        """Real-time update for a found vulnerability."""
+    def record_finding(self, scan_id: str, severity: str = "Medium", signature_data: Dict[str, Any] = None):
+        """Real-time update for a found vulnerability with deduplication."""
+        if signature_data:
+            # Generate stable signature
+            sig_str = json.dumps(signature_data, sort_keys=True, default=str)
+            sig = hashlib.md5(sig_str.encode()).hexdigest()
+            
+            if scan_id not in self._seen_signatures:
+                self._seen_signatures[scan_id] = set()
+            
+            if sig in self._seen_signatures[scan_id]:
+                return # Skip duplicate
+            
+            self._seen_signatures[scan_id].add(sig)
+
         self._stats["vulnerabilities"] += 1
         
         if severity.upper() in ["CRITICAL", "HIGH"]:
@@ -91,32 +141,70 @@ class StateManager:
     def complete_scan(self, scan_id: str, results: List[Any], duration: float):
         self._stats["active_scans"] = max(0, self._stats["active_scans"] - 1)
         
+        # Clean up ephemeral signatures for this scan
+        if scan_id in self._seen_signatures:
+            del self._seen_signatures[scan_id]
+
         c = 0
         v = 0
+        seen_results = set()
+        unique_results = []
+
         for r in results:
-            verdict = r.get('verdict', 'SECURE')
-            if 'CRITICAL' in verdict or 'LEAK' in verdict:
-                c += 1
-            if 'VULNERABLE' in verdict:
-                v += 1
+            # Re-verify deduplication for the final results list
+            payload = r.get('payload', {})
+            # Normalized signature for result storage
+            sig_data = {
+                "u": str(payload.get('url', '')).strip().lower(),
+                "t": str(payload.get('type', '')).upper(),
+                "d": str(payload.get('data', payload.get('payload', '')))
+            }
+            sig = hashlib.md5(json.dumps(sig_data, sort_keys=True, default=str).encode()).hexdigest()
+            
+            if sig not in seen_results:
+                seen_results.add(sig)
+                unique_results.append(r)
                 
-        self._stats["critical"] += c
-        self._stats["vulnerabilities"] += v
+                verdict = payload.get('severity', payload.get('verdict', 'VULNERABLE')).upper()
+                if 'CRITICAL' in verdict or 'LEAK' in verdict or 'HIGH' in verdict:
+                    # Note: record_finding already incremented global counters for real-time scans
+                    # This method updates the scan record itself. 
+                    # Global counts are managed in real-time to avoid double-counting at the end.
+                    pass
         
         for s in self._stats["scans"]:
             if s["id"] == scan_id:
-                s["status"] = "Completed"
-                s["duration"] = f"{duration:.2f}s"
-                s["results"] = results
+                s["status"] = "Finalizing" # V6: AI is building the report
+                # Defensive duration formatting
+                try:
+                    s["duration"] = f"{float(duration):.2f}s"
+                except (TypeError, ValueError):
+                    s["duration"] = "N/A"
+                s["results"] = unique_results
+                s["report_ready"] = s.get("report_ready", False) # Preserve or init
                 break
         
-        # Add to history for graph (simulating activity point)
-        self._stats["history"].append(v + c)
-        if len(self._stats["history"]) > 30:
-            self._stats["history"].pop(0)
-
         self._save()
+
+    def mark_report_ready(self, scan_id: str):
+        """V6: Mark the AI report as generated and ready for instant download."""
+        for s in self._stats["scans"]:
+            if s["id"] == scan_id:
+                s["report_ready"] = True
+                break
+        self.flush_immediate()
                 
+    def wipe_scans(self):
+        """Wipe all historical scan records from the database."""
+        self._stats["scans"] = []
+        self._stats["total_scans"] = 0
+        self._stats["active_scans"] = 0
+        self._stats["vulnerabilities"] = 0
+        self._stats["critical"] = 0
+        self._stats["history"] = [0] * 30
+        self._save()
+        print("[StateManager] All historical scans wiped successfully.")
+
     def reset_stale_scans(self):
         """Called on startup to clean up zombie scans."""
         cleaned = 0

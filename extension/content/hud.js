@@ -119,26 +119,24 @@
             addLog('INFO', 'Initiating page scan...');
             addChatMessage('agent', 'Scanning current page for vulnerabilities...');
 
-            try {
-                const response = await fetch(`${API_ENDPOINT}/api/attack/fire`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+            chrome.runtime.sendMessage({
+                type: "FORWARD_REQ",
+                payload: {
+                    endpoint: `${API_ENDPOINT}/api/attack/fire`,
+                    body: {
                         url: window.location.href,
                         mode: 'quick',
                         modules: ['xray']
-                    })
-                });
-
-                if (response.ok) {
+                    }
+                }
+            }, (response) => {
+                if (response && response.success) {
                     addLog('SUCCESS', 'Scan initiated!');
                     addChatMessage('agent', 'Scan queued. Monitoring for anomalies...');
                 } else {
-                    addLog('ERROR', 'Scan failed to start');
+                    addLog('ERROR', 'Backend unreachable');
                 }
-            } catch (err) {
-                addLog('ERROR', 'Backend unreachable');
-            }
+            });
         });
 
         // Fuzz Inputs
@@ -165,20 +163,23 @@
             addLog('CRITICAL', 'FULL ATTACK MODE ENGAGED');
             addChatMessage('agent', '☠️ Deploying all attack vectors...');
 
-            try {
-                await fetch(`${API_ENDPOINT}/api/attack/fire`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+            chrome.runtime.sendMessage({
+                type: "FORWARD_REQ",
+                payload: {
+                    endpoint: `${API_ENDPOINT}/api/attack/fire`,
+                    body: {
                         url: window.location.href,
                         mode: 'elite',
                         modules: ['chronomancer', 'doppelganger', 'full']
-                    })
-                });
-                addLog('SUCCESS', 'Full attack deployed');
-            } catch (err) {
-                addLog('ERROR', 'Attack failed');
-            }
+                    }
+                }
+            }, (response) => {
+                if (response && response.success) {
+                    addLog('SUCCESS', 'Full attack deployed');
+                } else {
+                    addLog('ERROR', 'Attack failed');
+                }
+            });
         });
 
         // Make HUD draggable

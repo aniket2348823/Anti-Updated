@@ -6,6 +6,7 @@ import asyncio
 from typing import Dict, List, Any
 from backend.core.hive import BaseAgent, EventType, HiveEvent
 from backend.core.protocol import JobPacket, ResultPacket, AgentID, Vulnerability, TaskPriority
+from backend.ai.cortex import CortexEngine
 
 class AgentIota(BaseAgent):
     """
@@ -17,6 +18,12 @@ class AgentIota(BaseAgent):
     def __init__(self, bus):
         super().__init__("agent_iota", bus) # AgentID.IOTA
         self.name = "agent_iota"
+        
+        # CORTEX AI (Local Ollama)
+        try:
+            self.ai = CortexEngine()
+        except:
+            self.ai = None
         
         # Knowledge Base: Deceptive Semantics
         self.safe_intent_keywords = ["cancel", "back", "close", "no", "decline"]
@@ -106,9 +113,21 @@ class AgentIota(BaseAgent):
              }
 
         # 3. Aggressive Upgrade Upsell (Clickjacking stub)
-        # If overlay detected (passed from extension)
         if data.get("is_overlay", False):
              return {"action": "BLOCK", "reason": "Clickjacking Overlay Detected"}
+
+        # 4. CORTEX AI: Semantic Intent Analysis (catches novel dark patterns)
+        if self.ai and self.ai.enabled and button_text:
+            try:
+                ai_verdict = self.ai.judge_user_intent(button_text, target_action or url, url)
+                if ai_verdict.get("action") == "BLOCK":
+                    return {
+                        "action": "BLOCK",
+                        "reason": f"AI-Detected: {ai_verdict.get('reason', 'Deceptive intent')}",
+                        "risk_score": ai_verdict.get("risk_score", 80)
+                    }
+            except:
+                pass  # Don't let AI failure block legitimate clicks
 
         return {"action": "ALLOW", "reason": "Intent verified"}
 

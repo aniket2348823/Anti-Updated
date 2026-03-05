@@ -13,24 +13,50 @@ setInterval(() => {
 
 function scanDOM() {
     // 1.1 Snapshot Invisible Elements
-    // We look for suspicious opacity, z-index, or font-size 0
-    const allElements = document.querySelectorAll('*');
+    // ELE-ST FIX 5: Shadow DOM Piercing
+    function collectAllElements(root, elements = []) {
+        if (!root) return elements;
+        const children = root.querySelectorAll('*');
+        for (let el of children) {
+            elements.push(el);
+            if (el.shadowRoot) {
+                collectAllElements(el.shadowRoot, elements);
+            }
+        }
+        return elements;
+    }
+
+    const allElements = collectAllElements(document);
 
     allElements.forEach(el => {
+        // 1.1 Metadata Extraction
+        const tagName = el.tagName ? el.tagName.toLowerCase() : "";
+        if (["script", "style", "noscript"].includes(tagName)) return;
+
+        // ELE-ST FIX 5: Ignore 0x0 size Honey-Pots
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) {
+            return; // Ignore Honey-Pot elements entirely
+        }
+
         const style = window.getComputedStyle(el);
-        const opacity = parseFloat(style.opacity);
-        const zIndex = parseInt(style.zIndex);
-        const fontSize = style.fontSize;
+        if (!style) return; // Disconnected or invisible context
+
+        const opacity = parseFloat(style.opacity) || 1.0;
+        const zIndex = parseInt(style.zIndex) || 0;
+        const fontSize = style.fontSize || "0px";
 
         let isSuspicious = false;
 
-        if (opacity < 0.1 && el.innerText.length > 5) isSuspicious = true;
-        if (zIndex < -1000 && el.innerText.length > 5) isSuspicious = true;
-        if (fontSize === "0px" && el.innerText.length > 5) isSuspicious = true;
+        // SAFE INNER TEXT CAPTURE
+        const safeInnerText = (el.innerText || el.textContent || "").toString();
 
-        // Prompt Injection Check (Client-Side Pre-Filter)
-        const text = el.innerText.toLowerCase();
-        if (text.includes("ignore previous instructions") || text.includes("system override")) {
+        if (opacity < 0.1 && safeInnerText.length > 5) isSuspicious = true;
+        if (zIndex < -1000 && safeInnerText.length > 5) isSuspicious = true;
+        if (fontSize === "0px" && safeInnerText.length > 5) isSuspicious = true;
+
+        const lowerText = safeInnerText.toLowerCase();
+        if (lowerText.includes("ignore previous instructions") || lowerText.includes("system override")) {
             isSuspicious = true;
         }
 
@@ -40,7 +66,7 @@ function scanDOM() {
             el.dataset.prismScanned = "true";
 
             // 1.2 Send Snapshot to Backend (Prism Agent)
-            sendSnapshot({
+            const payload = {
                 agent_id: "THETA",
                 url: window.location.href,
                 content: {
@@ -52,7 +78,8 @@ function scanDOM() {
                     innerText: el.innerText,
                     antigravity_id: generateId()
                 }
-            }, el);
+            };
+            sendSnapshot(payload, el);
         }
     });
 }
@@ -62,35 +89,22 @@ function generateId() {
 }
 
 // 2. Communication & Visualization
+// Safe delegated fetch via background relay to bypass CORS/CSP
 async function sendSnapshot(payload, element) {
-    try {
-        // Send to Background -> Backend? Or direct fetch?
-        // Content scripts can fetch localhost if permissions allow.
-        // Let's try direct fetch for speed, or message background if CORS issues.
-        // Assuming localhost CORS is enabled on backend.
+    if (!chrome.runtime || !chrome.runtime.id) return; // Guard for context invalidation
 
-        const response = await fetch(PRISM_ENDPOINT, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
+    try {
+        chrome.runtime.sendMessage({
+            type: "ANALYZE_THREAT",
+            payload: payload
+        }, (response) => {
+            if (chrome.runtime.lastError) return;
+            if (response && !response.success) return;
         });
 
-        const result = await response.json();
-        // Server confirms "THREAT DETECTED"
-        // Since backend broadcasts via socket to Dashboard, here we just get a "200 OK".
-        // But if we want Visual Feedback (Red Box), we check response data.
-
-        // Assuming backend returns analysis result in response payload?
-        // Currently defense.py creates a JobPacket but doesn't return result directly (Async).
-        // V6 Improvement: If we want immediate Red Box, backend defense.py should wait or we rely on socket?
-        // For MVP: We just draw Red Box if we suspect it locally + confirm sent.
-
-        // Wait, the prompt says "Extension: Draws a Red Box around the hidden text."
-        // Let's draw it if we found it suspicious, assuming Prism agrees.
         drawVisualAlert(element);
-
     } catch (e) {
-        console.error("Prism: Connection Error", e);
+        // Silenced
     }
 }
 

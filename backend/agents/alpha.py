@@ -1,9 +1,9 @@
 import asyncio
 from backend.core.hive import BaseAgent, EventType, HiveEvent
-from backend.core.protocol import JobPacket, ResultPacket, AgentID
-# Import Modules
-from backend.modules.logic.skipper import TheSkipper
-from backend.modules.tech.auth_bypass import AuthBypassTester
+from backend.core.protocol import JobPacket, ResultPacket, AgentID, ModuleConfig
+
+# Hybrid AI Engine
+from backend.ai.cortex import CortexEngine
 
 class AlphaAgent(BaseAgent):
     """
@@ -12,11 +12,10 @@ class AlphaAgent(BaseAgent):
     """
     def __init__(self, bus):
         super().__init__("agent_alpha", bus)
-        # Load Arsenal
-        self.arsenal = {
-            "logic_skipper": TheSkipper(),
-            "tech_auth_bypass": AuthBypassTester()
-        }
+        # Arsenal stripped. Alpha acts as a pure structural mapper.
+        # Hybrid AI Engine for intelligent classification
+        self.cortex = CortexEngine()
+        self.MAX_CRAWL_DEPTH = 5
 
     async def setup(self):
         # Listen for assigned jobs
@@ -37,14 +36,60 @@ class AlphaAgent(BaseAgent):
         if packet.config.agent_id != AgentID.ALPHA:
             return
 
+        # ELE-ST FIX 1: Infinite Recursion Deadlock Prevention
+        url_lower = packet.target.url.lower()
+        from urllib.parse import urlparse
+        path = urlparse(url_lower).path
+        depth = len([p for p in path.split('/') if p])
+        
+        if depth > self.MAX_CRAWL_DEPTH:
+            print(f"[{self.name}] 🛑 MAX_CRAWL_DEPTH ({self.MAX_CRAWL_DEPTH}) exceeded for {url_lower}. Dropping.")
+            return
+            
+        ctx = self.bus.get_or_create_context(event.scan_id)
+        if "visited_urls" not in ctx.baseline_cache:
+            ctx.baseline_cache["visited_urls"] = set()
+            
+        if url_lower in ctx.baseline_cache["visited_urls"]:
+            return
+            
+        ctx.baseline_cache["visited_urls"].add(url_lower)
+
         print(f"[{self.name}] Received Job {packet.id} ({packet.config.module_id})")
         
-        # 1. API Detection Logic
+        # 1. HYBRID AI: Intelligent Target Classification
+        classification = await self.cortex.classify_target(packet.target.url)
+        is_api = classification.get("is_api", False)
+        
+        # Fallback: Hardcoded indicators still checked
         api_indicators = ["/api", "/v1", "graphql", "swagger"]
-        is_api = any(ind in packet.target.url.lower() for ind in api_indicators)
+        if any(ind in url_lower for ind in api_indicators):
+            is_api = True
+        
+        # HYBRID: Flag typosquatting domains at recon stage
+        if "TYPOSQUATTING" in classification.get("tags", []):
+            print(f"[{self.name}]: ⚠️ TYPOSQUATTING DOMAIN DETECTED by GI5. Flagging as HIGH PRIORITY.")
+        
+        # PROTOCAL AWARENESS: Force scan for local files
+        if url_lower.startswith("file:///"):
+            is_api = True
+            print(f"[{self.name}]: LOCAL FILE DETECTED. Forcing Singularity V5 Analysis.")
         
         if is_api:
-            print(f"[{self.name}]: API DETECTED. Dispatching Handover.")
+            print(f"[{self.name}]: API/Local Target DETECTED. Dispatching Handover.")
+            
+            # BROADCAST SCAN PROGRESS
+            await self.bus.publish(HiveEvent(
+                type=EventType.LIVE_ATTACK,
+                source=self.name,
+                payload={
+                    "url": packet.target.url,
+                    "arsenal": "Recon Engine",
+                    "action": "Mapping API endpoint structure",
+                    "payload": "N/A (Structural discovery)"
+                }
+            ))
+            
             # Real implementation: Publish a VULN_CANDIDATE event that Beta listens to
             await self.bus.publish(HiveEvent(
                 type=EventType.VULN_CANDIDATE,
@@ -81,31 +126,22 @@ class AlphaAgent(BaseAgent):
                 payload={"url": packet.target.url, "tag": "DOPPELGANGER_CANDIDATE"}
             ))
 
-        # 2. Execute Module
-        module_id = packet.config.module_id
-        if module_id in self.arsenal:
-            module = self.arsenal[module_id]
-            result = await module.execute(packet)
-            
-            # REAL-TIME SYNC
-            if result.status in ["SUCCESS", "VULN_FOUND"]:
-                severity = "High" if "auth" in module_id else "Medium"
-                await self.bus.publish(HiveEvent(
-                    type=EventType.VULN_CONFIRMED,
-                    source=self.name,
-                    payload={
-                        "type": module_id.upper(),
-                        "url": packet.target.url,
-                        "severity": severity,
-                        "payload": "Logic Flaw"
-                    }
-                ))
-
-            # Publish Result
-            await self.bus.publish(HiveEvent(
-                type=EventType.JOB_COMPLETED,
-                source=self.name,
-                payload=result.dict()
-            ))
-        else:
-            print(f"[{self.name}] Module {module_id} not found.")
+        # 2. Execute Module via Sigma
+        print(f"[{self.name}] Delegating {packet.config.module_id} to SIGMA Orchestrator on {packet.target.url}")
+        
+        sigma_job = JobPacket(
+            priority=packet.priority,
+            target=packet.target,
+            config=ModuleConfig(
+                module_id=packet.config.module_id, 
+                agent_id=AgentID.SIGMA, 
+                params=packet.config.params,
+                aggression=packet.config.aggression,
+                session_id=packet.config.session_id
+            )
+        )
+        await self.bus.publish(HiveEvent(
+            type=EventType.JOB_ASSIGNED,
+            source=self.name,
+            payload=sigma_job.model_dump()
+        ))

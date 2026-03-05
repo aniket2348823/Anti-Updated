@@ -20,11 +20,120 @@ const Dashboard = ({ navigate }) => {
     const [latestThreat, setLatestThreat] = useState(null); // [NEW] For Explainability Panel
 
     const wsRef = useRef(null);
+    const statsBuffer = useRef([]);
+    const bufferTimer = useRef(null);
+
+    const flushBuffer = () => {
+        const events = statsBuffer.current;
+        if (events.length === 0) return;
+        statsBuffer.current = [];
+
+        setStats(prev => {
+            let nextState = { ...prev };
+            // Process ALL events sequentially
+            events.forEach(data => {
+                if (data.type === 'VULN_UPDATE') {
+                    nextState.metrics = data.payload.metrics || data.payload;
+                    nextState.graph_data = data.payload.history || nextState.graph_data;
+                }
+                else if (['LIVE_THREAT_LOG', 'ATTACK_HIT', 'VULN_CONFIRMED', 'LOG', 'JOB_ASSIGNED', 'RECON_PACKET', 'KEY_CAPTURE'].includes(data.type)) {
+                    if (data.type === 'LIVE_THREAT_LOG') {
+                        setLatestThreat(data.payload);
+                    }
+                    const defaultV6 = { injections_blocked: 0, deceptive_ui_blocked: 0, risk_score: 0 };
+                    const currentV6 = nextState.v6_metrics || defaultV6;
+                    const newMetrics = { ...currentV6 };
+
+                    let threat = data.payload;
+                    if (data.type === 'ATTACK_HIT' || data.type === 'JOB_ASSIGNED') {
+                        threat = {
+                            timestamp: new Date().toLocaleTimeString(),
+                            agent: data.source || 'agent_beta',
+                            threat_type: data.type === 'JOB_ASSIGNED' ? 'JOB DISPATCHED' : 'ATTACK GENERATED',
+                            url: data.payload?.url || data.payload?.target || (typeof data.payload === 'string' ? data.payload.substring(0, 40) : 'System Action'),
+                            severity: 'INFO',
+                            risk_score: 10
+                        };
+                    } else if (data.type === 'VULN_CONFIRMED') {
+                        threat = {
+                            timestamp: new Date().toLocaleTimeString(),
+                            agent: data.source || 'agent_gamma',
+                            threat_type: data.payload?.type || 'VULNERABILITY',
+                            url: data.payload?.id || 'Confirmed Exploit',
+                            severity: data.payload?.severity || 'CRITICAL',
+                            risk_score: 95
+                        };
+                    } else if (data.type === 'LOG') {
+                        threat = {
+                            timestamp: new Date().toLocaleTimeString(),
+                            agent: data.source || 'system',
+                            threat_type: 'SYSTEM LOG',
+                            url: typeof data.payload === 'string' ? data.payload.substring(0, 60) : 'Log Entry',
+                            severity: 'LOW',
+                            risk_score: 5
+                        };
+                    } else if (data.type === 'RECON_PACKET') {
+                        threat = {
+                            timestamp: new Date().toLocaleTimeString(),
+                            agent: 'spy_v2',
+                            threat_type: 'TRAFFIC INTERCEPTED',
+                            url: data.payload?.url || 'Unknown Endpoint',
+                            severity: 'INFO',
+                            risk_score: 15
+                        };
+                    } else if (data.type === 'KEY_CAPTURE') {
+                        threat = {
+                            timestamp: new Date().toLocaleTimeString(),
+                            agent: 'synapse_v2',
+                            threat_type: 'CREDENTIAL LEAK',
+                            url: data.payload?.url || 'Sensitive Header',
+                            severity: 'HIGH',
+                            risk_score: 85
+                        };
+                    }
+
+                    else if (data.type === 'LIVE_ATTACK_FEED') {
+                        threat = {
+                            timestamp: data.payload.timestamp || new Date().toLocaleTimeString(),
+                            agent: data.payload.agent || 'agent_sigma',
+                            threat_type: `[ATTACK] ${data.payload.arsenal?.toUpperCase() || 'GENERAL'}`,
+                            url: data.payload.url || 'Target Endpoint',
+                            severity: 'HIGH',
+                            risk_score: 45,
+                            action: data.payload.action,
+                            payload_data: data.payload.payload
+                        };
+                    }
+
+                    if (['PROMPT_INJECTION', 'INVISIBLE_TEXT', 'HIDDEN_TEXT'].includes(threat.threat_type)) {
+                        newMetrics.injections_blocked += 1;
+                    } else if (['DECEPTIVE_UI', 'PHISHING', 'ROACH_MOTEL', 'DARK_PATTERN_BLOCK'].includes(threat.threat_type)) {
+                        newMetrics.deceptive_ui_blocked += 1;
+                    }
+
+                    let score = threat.risk_score || (threat.severity === 'CRITICAL' ? 95 : 50);
+                    newMetrics.risk_score = score;
+
+                    nextState.v6_metrics = newMetrics;
+                    nextState.threat_feed = [threat, ...(nextState.threat_feed || [])].slice(0, 50);
+                }
+
+                if (['ATTACK_HIT', 'RECON_PACKET', 'GI5_CRITICAL', 'VULN_CONFIRMED'].includes(data.type)) {
+                    const currentVal = nextState.metrics?.vulnerabilities || 0;
+                    const jitter = Math.random() * 0.5;
+                    const activePoint = currentVal + jitter;
+                    nextState.graph_data = [...(nextState.graph_data || []), activePoint].slice(-30);
+                }
+            });
+            return nextState;
+        });
+    };
 
     useEffect(() => {
+        const backendHost = window.location.hostname === 'localhost' ? 'localhost:8000' : '127.0.0.1:8000';
         const fetchStats = async () => {
             try {
-                const res = await fetch("http://127.0.0.1:8000/api/dashboard/stats");
+                const res = await fetch(`http://${backendHost}/api/dashboard/stats`);
                 const data = await res.json();
 
                 // DEFENSIVE MERGE: Ensure v6_metrics exists even if backend is old
@@ -50,51 +159,27 @@ const Dashboard = ({ navigate }) => {
         wsRef.current.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
+                statsBuffer.current.push(data);
 
-                if (data.type === 'VULN_UPDATE') {
-                    setStats(prev => ({
-                        ...prev,
-                        metrics: data.payload.metrics || data.payload,
-                        graph_data: data.payload.history || prev.graph_data
-                    }));
+                // Auto-download generated PDF report
+                if (data.type === 'GI5_LOG' && data.payload && data.payload.includes('REPORT GENERATED:')) {
+                    const parts = data.payload.split(/\\|\//);
+                    const filename = parts[parts.length - 1];
+                    const url = `http://${backendHost}/api/reports/download/${filename}`;
+
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.target = '_blank';
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
                 }
-                else if (data.type === 'LIVE_THREAT_LOG') {
-                    // Update Panel
-                    setLatestThreat(data.payload);
 
-                    setStats(prev => {
-                        // V6: Calculate new metrics (Defensive)
-                        const defaultV6 = { injections_blocked: 0, deceptive_ui_blocked: 0, risk_score: 0 };
-                        const currentV6 = prev.v6_metrics || defaultV6;
-                        const newMetrics = { ...currentV6 };
-                        const threat = data.payload;
-
-                        if (['PROMPT_INJECTION', 'INVISIBLE_TEXT', 'HIDDEN_TEXT'].includes(threat.threat_type)) {
-                            newMetrics.injections_blocked += 1;
-                        } else if (['DECEPTIVE_UI', 'PHISHING', 'ROACH_MOTEL', 'DARK_PATTERN_BLOCK'].includes(threat.threat_type)) {
-                            newMetrics.deceptive_ui_blocked += 1;
-                        }
-
-                        let score = threat.risk_score || (threat.severity === 'CRITICAL' ? 95 : 50);
-                        newMetrics.risk_score = score;
-
-                        return {
-                            ...prev,
-                            v6_metrics: newMetrics,
-                            threat_feed: [data.payload, ...(prev.threat_feed || [])].slice(0, 50)
-                        };
-                    });
-                }
-                else if (data.type === 'ATTACK_HIT' || data.type === 'RECON_PACKET' || data.type === 'GI5_CRITICAL') {
-                    setStats(prev => {
-                        const currentVal = prev.metrics.vulnerabilities || 0;
-                        const jitter = Math.random() * 0.5;
-                        const activePoint = currentVal + jitter;
-                        const newGraphData = [...(prev.graph_data || []), activePoint].slice(-30);
-                        return {
-                            ...prev,
-                            graph_data: newGraphData
-                        };
+                if (!bufferTimer.current) {
+                    bufferTimer.current = requestAnimationFrame(() => {
+                        flushBuffer();
+                        bufferTimer.current = null;
                     });
                 }
             } catch (e) {
@@ -285,6 +370,12 @@ const Dashboard = ({ navigate }) => {
                                     if (item.agent?.includes('theta')) { agentName = "THE SENTINEL"; agentColor = "text-purple-400"; }
                                     else if (item.agent?.includes('iota')) { agentName = "THE INSPECTOR"; agentColor = "text-orange-400"; }
                                     else if (item.agent?.includes('beta')) { agentName = "BETA (BREAKER)"; agentColor = "text-red-400"; }
+                                    else if (item.agent?.includes('alpha')) { agentName = "ALPHA (SCOUT)"; agentColor = "text-cyan-400"; }
+                                    else if (item.agent?.includes('gamma')) { agentName = "GAMMA (TYCOON)"; agentColor = "text-yellow-400"; }
+                                    else if (item.agent?.includes('omega')) { agentName = "OMEGA (STRAT)"; agentColor = "text-pink-400"; }
+                                    else if (item.agent?.includes('zeta')) { agentName = "ZETA (CORTEX)"; agentColor = "text-indigo-400"; }
+                                    else if (item.agent?.includes('sigma')) { agentName = "SIGMA (SMITH)"; agentColor = "text-green-400"; }
+                                    else if (item.agent?.includes('kappa')) { agentName = "KAPPA (LIBRARIAN)"; agentColor = "text-teal-400"; }
 
                                     return (
                                         <motion.div
@@ -298,7 +389,12 @@ const Dashboard = ({ navigate }) => {
                                             <div className="col-span-2 text-gray-500">{item.timestamp}</div>
                                             <div className={`col-span-2 font-bold ${agentColor}`}>{agentName}</div>
                                             <div className="col-span-2 text-gray-300 truncate" title={item.threat_type}>{item.threat_type}</div>
-                                            <div className="col-span-4 text-gray-400 truncate font-light" title={item.url}>{item.url}</div>
+                                            <div className="col-span-4 text-gray-400 truncate font-light" title={item.payload_data || item.url}>
+                                                {item.action ? (
+                                                    <span className="text-blue-400 font-medium">[{item.action}] </span>
+                                                ) : null}
+                                                {item.payload_data || item.url}
+                                            </div>
                                             <div className="col-span-1">
                                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.severity === 'CRITICAL' ? 'bg-red-500 text-black' :
                                                     item.severity === 'HIGH' ? 'bg-orange-500 text-black' :

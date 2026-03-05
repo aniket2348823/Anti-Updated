@@ -4,11 +4,11 @@ import ssl
 import asyncio
 import numpy as np
 from urllib.parse import urlparse
-from backend.ai.gi5 import GI5Engine
+from backend.ai.cortex import CortexEngine
 from typing import List, Dict, Any
 
-# Initialize Brain
-brain = GI5Engine()
+# Initialize Brain (Local Ollama)
+brain = CortexEngine()
 
 class ChronomancerEngine:
     def __init__(self, target_url, method, headers, body, concurrency=50):

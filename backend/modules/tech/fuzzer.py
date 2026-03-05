@@ -1,5 +1,6 @@
 from backend.core.base import BaseArsenalModule
-from backend.core.protocol import JobPacket, ResultPacket, Vulnerability
+from backend.core.protocol import JobPacket, ResultPacket, Vulnerability, TaskTarget
+from backend.ai.cortex import CortexEngine
 import aiohttp
 import time
 
@@ -7,43 +8,68 @@ class APIFuzzer(BaseArsenalModule):
     def __init__(self):
         super().__init__()
         self.name = "API Fuzzer"
+        # CORTEX AI for intelligent vector generation
+        try:
+            self.ai = CortexEngine()
+        except:
+            self.ai = None
 
-    async def execute(self, packet: JobPacket) -> ResultPacket:
-        start_time = time.time()
-        vulnerabilities = []
-        
+    async def generate_payloads(self, packet: JobPacket) -> list[TaskTarget]:
+        targets = []
         fuzz_vectors = [
+            "<script>alert('Antigravity')</script>", # XSS
             "A" * 10000, # Buffer Overflow attempt
             "%00",       # Null Byte
             "{{7*7}}",   # SSTI
             "../" * 10   # Path Traversal
         ]
         
-        try:
-             async with aiohttp.ClientSession() as session:
-                for vector in fuzz_vectors:
-                    # Append to URL path for simplicity
-                    fuzzed_url = f"{packet.target.url}/{vector}"
-                    try:
-                         async with session.get(fuzzed_url) as response:
-                            if response.status == 500:
-                                vulnerabilities.append(Vulnerability(
-                                    name="Unhandled Exception (Fuzzing)",
-                                    severity="LOW",
-                                    description="Server returned 500 Internal Server Error on malformed input.",
-                                    evidence=f"Input: {vector}, Status: 500",
-                                    remediation="Implement global error handling and input validation."
-                                ))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if self.ai and self.ai.enabled:
+            try:
+                ai_vectors = await self.ai.generate_fuzz_vectors(
+                    target_url=packet.target.url,
+                    content_type=packet.config.params.get("content_type", "") if hasattr(packet.config, 'params') else "",
+                    tech_stack=packet.config.params.get("tech_stack", "") if hasattr(packet.config, 'params') else ""
+                )
+                if ai_vectors:
+                    fuzz_vectors.extend(ai_vectors)
+            except:
+                pass
+                
+        for vector in fuzz_vectors:
+            fuzzed_url = f"{packet.target.url}?fuzz={vector}"
+            targets.append(TaskTarget(
+                url=fuzzed_url,
+                method="GET",
+                headers=packet.target.headers,
+                payload=packet.target.payload
+            ))
+        return targets
 
-        return ResultPacket(
-            job_id=packet.id if hasattr(packet, 'id') else "unknown",
-            source_agent=packet.config.agent_id,
-            status="VULN_FOUND" if vulnerabilities else "SUCCESS",
-            execution_time_ms=(time.time() - start_time) * 1000,
-            data={},
-            vulnerabilities=vulnerabilities
-        )
+    async def analyze_responses(self, interactions: list[tuple[TaskTarget, str]], packet: JobPacket) -> list[Vulnerability]:
+        vulnerabilities = []
+        for target, text in interactions:
+            if not text or not isinstance(text, str): continue
+            
+            vector = ""
+            if "?fuzz=" in target.url:
+                vector = target.url.split("?fuzz=")[1]
+                
+            if vector and vector in text and "<script>" in vector:
+                vulnerabilities.append(Vulnerability(
+                    name="Cross-Site Scripting (XSS)",
+                    severity="HIGH",
+                    description="Reflection of unsterilized input detected in page content.",
+                    evidence=f"Payload: {vector} reflected in response.",
+                    remediation="Sanitize all user inputs and use Content Security Policy (CSP)."
+                ))
+                
+            if "root:" in text or "boot.ini" in text:
+                 vulnerabilities.append(Vulnerability(
+                    name="Path Traversal",
+                    severity="CRITICAL",
+                    description="Access to sensitive system files detected.",
+                    evidence="Leakage of 'root:' or OS identifiers in response.",
+                    remediation="Restrict file access and validate input paths."
+                ))
+        return vulnerabilities

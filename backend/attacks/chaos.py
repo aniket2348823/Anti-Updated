@@ -2,10 +2,10 @@ import aiohttp
 import asyncio
 import json
 from typing import Dict, Any, List
-from backend.ai.gi5 import GI5Engine
+from backend.ai.cortex import CortexEngine
 
-# Initialize Brain
-brain = GI5Engine()
+# Initialize Brain (Local Ollama)
+brain = CortexEngine()
 
 class ChaosEngine:
     def __init__(self, target_url: str, method: str, headers: Dict[str, str], body: Any):

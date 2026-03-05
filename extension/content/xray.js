@@ -287,4 +287,16 @@
         }
     });
 
+    // ========================================================================
+    // DASHBOARD UI HANDSHAKE (HEARTBEAT)
+    // ========================================================================
+
+    // Broadcast immediately on load
+    window.postMessage({ type: 'ANTIGRAVITY_EXTENSION_CONNECTED' }, '*');
+
+    // Broadcast periodically to guarantee React picks it up regardless of mount timing
+    setInterval(() => {
+        window.postMessage({ type: 'ANTIGRAVITY_EXTENSION_CONNECTED' }, '*');
+    }, 2000);
+
 })();

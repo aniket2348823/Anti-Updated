@@ -7,6 +7,7 @@ class Config:
     
     # Scan Configuration
     SCAN_TIMEOUT = 180  # Max scan duration in seconds (3 minutes)
+    DEPTH_SCAN_TIMEOUT = 240  # 4 minutes for depth scans
     
     # Recon Constants
     IGNORED_EXTENSIONS = ['.jpg', '.png', '.gif', '.css', '.js', '.woff2', '.svg']

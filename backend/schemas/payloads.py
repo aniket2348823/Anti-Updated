@@ -26,3 +26,4 @@ class AttackPayload(BaseModel):
     velocity: int # Mapping to concurrency
     modules: list[str] = []
     filters: list[str] = []
+    duration: Optional[int] = 180  # Default 3 mins

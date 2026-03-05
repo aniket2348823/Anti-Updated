@@ -95,7 +95,7 @@ async def test_swarm_communication():
     await bus.publish(HiveEvent(
         type=EventType.JOB_ASSIGNED,
         source="Orchestrator",
-        payload=test_packet.dict()
+        payload=test_packet.model_dump()
     ))
     
     # Allow propagation time
@@ -110,7 +110,7 @@ async def test_swarm_communication():
     await bus.publish(HiveEvent(
         type=EventType.JOB_ASSIGNED,
         source="agent_beta",
-        payload=sigma_job.dict()
+        payload=sigma_job.model_dump()
     ))
     
     # Allow propagation time

@@ -3,8 +3,11 @@ import asyncio
 import random
 import logging
 from typing import Dict, Any, Optional
+# Hybrid AI Engine
+from backend.ai.cortex import CortexEngine
 
 logger = logging.getLogger("Mimic")
+cortex = CortexEngine()
 
 class MimicSession:
     """
@@ -38,7 +41,7 @@ class MimicSession:
         }
     ]
 
-    def __init__(self):
+    def __init__(self, target_url: str = ""):
         self.state = 0 # Start in BURST
         self.current_profile = random.choice(self.PROFILES)
         self.request_count = 0

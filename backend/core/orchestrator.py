@@ -2,6 +2,7 @@ import asyncio
 import logging
 from datetime import datetime
 from backend.core.hive import EventBus, EventType, HiveEvent
+from backend.core.protocol import ModuleConfig, AgentID, TaskPriority, TaskTarget
 # NeuroNegotiator removed - dead code cleanup V6
 from backend.core.state import stats_db_manager
 from backend.core.config import settings
@@ -16,14 +17,16 @@ from backend.agents.zeta import ZetaAgent
 from backend.agents.sigma import SigmaAgent
 from backend.agents.kappa import KappaAgent 
 # V6 AGENTS
-# V6 AGENTS
 from backend.agents.sentinel import AgentTheta # Agent Theta (The Sentinel)
 from backend.agents.inspector import AgentIota # Agent Iota (The Inspector)
 
 # recorder removed - unused import cleanup V6
 from backend.core.reporting import ReportGenerator # The Voice
+# Hybrid AI Engine for campaign strategy
+from backend.ai.cortex import CortexEngine
 
 logger = logging.getLogger("HiveOrchestrator")
+ai_cortex = CortexEngine()
 
 class HiveOrchestrator:
     # Global Registry for API Access (Nervous System)
@@ -71,7 +74,7 @@ class HiveOrchestrator:
         # --- REPORTING LINK ---
         scan_events = []
         async def event_listener(event: HiveEvent):
-            scan_events.append(event.dict())
+            scan_events.append(event.model_dump())
             
             # REAL-TIME DASHBOARD SYNC
             if event.type == EventType.VULN_CONFIRMED:
@@ -84,7 +87,13 @@ class HiveOrchestrator:
                      pass
 
                 severity = real_payload.get('severity', 'High')
-                stats_db_manager.record_finding(severity)
+                # Passing normalized signature data to StateManager for robust deduplication
+                sig_data = {
+                    "url": str(real_payload.get('url', '')).strip().lower(),
+                    "type": str(real_payload.get('type', '')).upper(),
+                    "data": str(real_payload.get('data', real_payload.get('payload', '')))
+                }
+                stats_db_manager.record_finding(scan_id, severity, sig_data)
                 
                 # Broadcast authoritative stats to UI
                 current_stats = stats_db_manager.get_stats()
@@ -116,6 +125,34 @@ class HiveOrchestrator:
                         "severity": severity,
                         "timestamp": datetime.now().strftime("%H:%M:%S"),
                         "risk_score": risk_score
+                    }
+                })
+                
+            elif event.type == EventType.VULN_CANDIDATE:
+                real_payload = event.payload
+                threat_type = real_payload.get("tag", "Anomaly Target")
+                await manager.broadcast({
+                    "type": "LIVE_THREAT_LOG",
+                    "payload": {
+                        "agent": event.source,
+                        "threat_type": f"[RECON] {threat_type}",
+                        "url": real_payload.get("url", "Unknown Source"),
+                        "severity": "INFO",
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "risk_score": 0
+                    }
+                })
+
+            elif event.type == EventType.LIVE_ATTACK:
+                await manager.broadcast({
+                    "type": "LIVE_ATTACK_FEED",
+                    "payload": {
+                        "agent": event.source,
+                        "url": event.payload.get("url", "N/A"),
+                        "arsenal": event.payload.get("arsenal", "General"),
+                        "action": event.payload.get("action", "Processing"),
+                        "payload": event.payload.get("payload", "N/A"),
+                        "timestamp": datetime.now().strftime("%H:%M:%S")
                     }
                 })
 
@@ -152,7 +189,7 @@ class HiveOrchestrator:
         breaker = BetaAgent(bus)
         analyst = GammaAgent(bus)
         strategist = OmegaAgent(bus)
-        cortex = ZetaAgent(bus)
+        governor = ZetaAgent(bus)
         
         # AWAKENING: The Smith and The Librarian
         sigma = SigmaAgent(bus)
@@ -171,7 +208,7 @@ class HiveOrchestrator:
             "scope": target_config.get("url", "")
         }
         
-        agents = [scout, breaker, analyst, strategist, cortex, sigma, kappa, sentinel, inspector]
+        agents = [scout, breaker, analyst, strategist, governor, sigma, kappa, sentinel, inspector]
         for agent in agents:
             agent.mission_config = mission_profile # Inject Config
             await agent.start()
@@ -183,11 +220,15 @@ class HiveOrchestrator:
         HiveOrchestrator.active_agents["ALPHA"] = scout
         HiveOrchestrator.active_agents["BETA"] = breaker
         HiveOrchestrator.active_agents["GAMMA"] = analyst
-        HiveOrchestrator.active_agents["ZETA"] = cortex
+        HiveOrchestrator.active_agents["ZETA"] = governor
         HiveOrchestrator.active_agents["SIGMA"] = sigma
         HiveOrchestrator.active_agents["KAPPA"] = kappa
+        
+        # HYBRID AI: Log campaign strategy
+        strategy_name = "Dynamic Multi-Core Heuristics"
+        logger.info(f"AI Campaign Strategy: {strategy_name}")
             
-        await manager.broadcast({"type": "GI5_LOG", "payload": "SINGULARITY V5 ONLINE. The Cortex is watching."})
+        await manager.broadcast({"type": "GI5_LOG", "payload": f"SINGULARITY V5 ONLINE. AI Strategy: {strategy_name}."})
         await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Running"}})
 
         # 5. Seed the Mission
@@ -199,27 +240,102 @@ class HiveOrchestrator:
 
         await manager.broadcast({"type": "GI5_LOG", "payload": "HYPER-MIND ONLINE. Neural Negotiation Active."})
 
-        # 6. Run Duration (Max 3 minutes for in-depth scanning)
-        scan_duration = settings.SCAN_TIMEOUT  # 180 seconds
+        # 6. Run Duration (Custom duration from config or default)
+        duration_val = target_config.get('duration')
+        scan_duration = int(duration_val) if duration_val is not None else settings.SCAN_TIMEOUT
+        scan_duration = max(scan_duration, 1) # Ensure at least 1s
         try:
             await asyncio.sleep(scan_duration)
         except asyncio.CancelledError:
             pass
         finally:
             await manager.broadcast({"type": "GI5_LOG", "payload": "Hyper-Mind: Mission Complete. Shutting down."})
-            for agent in agents: await agent.stop()
+            for agent in agents:
+                try:
+                    await asyncio.wait_for(agent.stop(), timeout=5.0)
+                except Exception as e:
+                    logger.error(f"Failed to stop agent {agent.name}: {e}")
+            
+            # --- V6 GRACE PERIOD ---
+            # Allow event bus to flush any final findings published just before shutdown
+            await asyncio.sleep(1.0)
+            
+            # --- SCAN ISOLATION: UNSUBSCRIBE LISTENERS ---
+            # Crucial: Stop old scans from polluting the bus or leaking memory
+            for etype in EventType:
+                bus.unsubscribe(etype, event_listener)
+            
             # Clear registry
             HiveOrchestrator.active_agents.clear()
+            print(f"[Orchestrator] Scan {scan_id} Cleaned Up. Listeners detached.")
             
             # --- GENERATE GOD MODE REPORT ---
-            items_found = [e for e in scan_events if e['type'] == EventType.VULN_CONFIRMED]
-            stats_db_manager.complete_scan(scan_id, items_found, scan_duration)
-            
             try:
-                report_path = ReportGenerator().generate_report(scan_id, scan_events, target_config['url'])
-                await manager.broadcast({"type": "GI5_LOG", "payload": f"REPORT GENERATED: {report_path}"})
+                items_found = [e for e in scan_events if e.get('type') in (EventType.VULN_CONFIRMED, "VULN_CONFIRMED")]
+                # V6: complete_scan now sets status to 'Finalizing'
+                stats_db_manager.complete_scan(scan_id, items_found, scan_duration)
+                await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Finalizing"}})
             except Exception as e:
-                logger.error(f"Report Gen Failed: {e}")
+                logger.error(f"Failed to record complete_scan (Finalizing): {e}")
+
+            try:
+                # V6: Generate report in background and sync with UI
+                async def generate_and_mark_ready():
+                    try:
+                        report_gen = ReportGenerator()
+                        print(f"[Orchestrator] Starting AI report generation for scan {scan_id}...")
+                        
+                        # V6: Build telemetry from real scan data
+                        end_time = datetime.now()
+                        telemetry = {
+                            "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "duration": f"{scan_duration}s",
+                            "total_requests": len(scan_events),
+                            "avg_latency_ms": "N/A",
+                            "peak_concurrency": len(agents),
+                            "ai_calls": 0,
+                            "llm_avg_latency": "N/A",
+                            "circuit_breaker_activations": 0,
+                        }
+                        
+                        # V6: Add 900s hard timeout (15 mins)
+                        await asyncio.wait_for(
+                            report_gen.generate_report(scan_id, scan_events, target_config['url'], telemetry=telemetry),
+                            timeout=900.0
+                        )
+                        
+                        # 1. Mark as ready in state (Database)
+                        stats_db_manager.mark_report_ready(scan_id)
+                        
+                        # 2. Push broadcast to UI to unlock buttons (WebSocket)
+                        await manager.broadcast({"type": "REPORT_READY", "payload": {"id": scan_id}})
+                        
+                        # 3. Final status to 'Completed' (Sync UI state)
+                        await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Completed"}})
+                        
+                        # Update internal database cache
+                        for s in stats_db_manager._stats["scans"]:
+                            if s["id"] == scan_id:
+                                s["status"] = "Completed"
+                                break
+                        
+                        stats_db_manager.flush_immediate()
+                        print(f"[Orchestrator] AI Report for {scan_id} is now READY and SYNCED with UI.")
+                    except asyncio.TimeoutError:
+                        print(f"[Orchestrator] Report generation TIMED OUT for {scan_id}. Forcing ready.")
+                        stats_db_manager.mark_report_ready(scan_id)
+                        await manager.broadcast({"type": "REPORT_READY", "payload": {"id": scan_id}})
+                    except Exception as ge:
+                        print(f"[Orchestrator] Background Report Async Task Error: {ge}")
+                        import traceback
+                        traceback.print_exc()
+
+                asyncio.create_task(generate_and_mark_ready())
+                await manager.broadcast({"type": "GI5_LOG", "payload": f"FORENSIC REPORT GENERATION INITIATED FOR {scan_id}"})
+            except Exception as e:
+                logger.error(f"Report Background Gen Trigger Failed: {e}")
             # --------------------------------
 
-            await manager.broadcast({"type": "SCAN_UPDATE", "payload": {"id": scan_id, "status": "Completed"}})
+            # Transition to Finalizing in the logs
+            await manager.broadcast({"type": "GI5_LOG", "payload": f"SCAN FINISHED. AI FINALIZING FORENSIC DATA FOR {scan_id}..."})

@@ -45,7 +45,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 
 // 3. THE "HALT & CONSULT" LOGIC
-// Since chrome.debugger doesn't inherently block clicks purely via events, 
+// Since chrome.debugger doesn't inherently block clicks purely via events,
 // we combine it with Runtime.evaluate to inject a 'before-click' check.
 // *Note: In a full production implementation, we would use 'Fetch.enable' to pause network requests.*
 
@@ -80,14 +80,20 @@ function checkNavigationRisk(url) {
 
 // 4. HIVE COMMUNICATION BRIDGE
 function consultHive(payload) {
-    fetch(HIVE_ENDPOINT, {
+    // USE SAFE FETCH (from background.js context)
+    safeFetch(HIVE_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
     })
-        .then(res => res.json())
+        .then(res => {
+            if (res && res.ok && typeof res.json === 'function') {
+                return res.json();
+            }
+            return { verdict: "ALLOW" }; // Default to safe if unparseable or backend offline
+        })
         .then(verdict => {
-            if (verdict.verdict === "BLOCK") {
+            if (verdict && verdict.verdict === "BLOCK") {
                 executeBlockProtocol(verdict.reason);
             }
         })

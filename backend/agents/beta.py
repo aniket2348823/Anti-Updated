@@ -2,10 +2,8 @@ import asyncio
 import random
 from backend.core.hive import BaseAgent, EventType, HiveEvent
 from backend.core.protocol import JobPacket, ResultPacket, AgentID, TaskPriority, ModuleConfig, TaskTarget
-from backend.modules.tech.sqli import SQLInjectionProbe
-from backend.modules.tech.fuzzer import APIFuzzer
-from backend.modules.tech.jwt import JWTTokenCracker
-from backend.ai.gi5 import GI5Engine
+
+from backend.ai.cortex import CortexEngine
 import json
 
 class BetaAgent(BaseAgent):
@@ -18,15 +16,11 @@ class BetaAgent(BaseAgent):
     """
     def __init__(self, bus):
         super().__init__("agent_beta", bus)
-        self.arsenal = {
-            "tech_sqli": SQLInjectionProbe(),
-            "tech_fuzzer": APIFuzzer(),
-            "tech_jwt": JWTTokenCracker()
-        }
+        # Arsenal stripped. Beta is now purely a tactical router.
         
-        # AI Integration
+        # CORTEX AI Integration (Local Ollama)
         try:
-            self.ai = GI5Engine()
+            self.ai = CortexEngine()
         except:
             self.ai = None
 
@@ -52,7 +46,7 @@ class BetaAgent(BaseAgent):
             print(f"[{self.name}] Intercepted API Candidate: {url}. Launching Polyglot Assault.")
             
             # SOTA: AI-Driven Mutation
-            mutated_polyglot = self.waf_mutate(random.choice(self.polyglots))
+            mutated_polyglot = await self.waf_mutate(random.choice(self.polyglots))
             print(f"[{self.name}] >> AI Mutation Strategy: {mutated_polyglot}")
             
             # Launch Generic Fuzzer Job with advanced config
@@ -97,19 +91,20 @@ class BetaAgent(BaseAgent):
         print(f"[{self.name}] Received Breaker Job {packet.id}")
         await self._execute_packet(packet)
 
-    def waf_mutate(self, payload: str) -> str:
+    async def waf_mutate(self, payload: str) -> str:
         """
-        Singularity Feature: GAN-Lite Mutation (AI Augmented)
+        CORTEX AI: WAF Bypass Mutation Engine
+        Uses Ollama to generate intelligent WAF evasion variants.
         """
-        # Try AI First
+        # Try AI First (Ollama Cortex)
         if self.ai and self.ai.enabled:
-             # Just ask for one variant
-             variants = self.ai.synthesize_payloads({"base": payload})
-             if variants:
-                 # extract just the json value if possible, or string
-                 try:
-                     return str(variants[0].get("json", {}).get("base", payload)) + " /* AI-MUTATED */"
-                 except: pass
+            try:
+                mutated = await self.ai.mutate_waf_bypass(payload)
+                if mutated and mutated != payload:
+                    print(f"[{self.name}] >> CORTEX AI: WAF Mutation generated.")
+                    return mutated
+            except Exception as e:
+                print(f"[{self.name}] CORTEX WAF Mutation failed: {e}")
 
         # Fallback to random heuristics
         strategy = random.choice(["case_swap", "whitespace", "null_byte", "comment_split"])
@@ -133,65 +128,22 @@ class BetaAgent(BaseAgent):
         return None
 
     async def _execute_packet(self, packet: JobPacket):
-        # Cyber-Organism Protocol: Pre-Flight Check (Mock implementation of RPC)
-        # "Asking The Cortex..."
-        # If we had a direct reference to Zeta, we'd call zeta.validate_job(packet)
-        # For this prototype, we'll proceed, assuming Zeta monitors via Bus.
+        # Cyber-Organism Protocol: Pre-Flight Check
+        print(f"[{self.name}] Delegating {packet.config.module_id} to SIGMA Orchestrator on {packet.target.url}")
         
-        print(f"[{self.name}] Executing {packet.config.module_id} on {packet.target.url}")
-        
-        # Report Telemetry: Injection Start
+        # Forward execution to Sigma. Beta is no longer permitted to execute network IO.
+        sigma_job = JobPacket(
+            priority=packet.priority,
+            target=packet.target,
+            config=ModuleConfig(
+                module_id=packet.config.module_id, 
+                agent_id=AgentID.SIGMA, 
+                params=packet.config.params,
+                aggression=packet.config.aggression
+            )
+        )
         await self.bus.publish(HiveEvent(
-            type=EventType.LOG,
+            type=EventType.JOB_ASSIGNED,
             source=self.name,
-            payload={"message": f"Payload {str(packet.target.payload)[:10]}..." if packet.target.payload else "Standard Payload"}
+            payload=sigma_job.model_dump()
         ))
-        
-        module_id = packet.config.module_id
-        if module_id in self.arsenal:
-            module = self.arsenal[module_id]
-            result = await module.execute(packet)
-            
-            # REAL-TIME SYNC: Check if module found a vulnerability
-            if result.status in ["SUCCESS", "VULN_FOUND"] and result.data:
-                # Determine severity based on module
-                severity = "Medium"
-                if "sqli" in module_id or "jwt" in module_id:
-                    severity = "Critical"
-                elif "xss" in module_id:
-                    severity = "High"
-                
-                await self.bus.publish(HiveEvent(
-                    type=EventType.VULN_CONFIRMED,
-                    source=self.name,
-                    payload={
-                        "type": module_id.upper(),
-                        "url": packet.target.url,
-                        "severity": severity,
-                        "payload": packet.target.payload
-                    }
-                ))
-
-            await self.bus.publish(HiveEvent(
-                type=EventType.JOB_COMPLETED,
-                source=self.name,
-                payload=result.dict()
-            ))
-            
-            # Cyber-Organism Protocol: Feedback Loop
-            if result.next_step == "SIGMA_EVASION":
-                print(f"[{self.name}] [WAF] BLOCKED. Requesting evasion payloads from Agent Sigma.")
-                sigma_job = JobPacket(
-                    priority=TaskPriority.CRITICAL,
-                    target=packet.target,
-                    config=ModuleConfig(
-                        module_id="sigma_bypass", # Sigma interprets this
-                        agent_id=AgentID.SIGMA, 
-                        params={"original_payload": packet.target.payload}
-                    )
-                )
-                await self.bus.publish(HiveEvent(
-                    type=EventType.JOB_ASSIGNED,
-                    source=self.name,
-                    payload=sigma_job.dict()
-                ))

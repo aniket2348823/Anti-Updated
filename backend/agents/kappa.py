@@ -20,10 +20,10 @@ class KappaAgent(BaseAgent):
         base_dir = os.getcwd()
         self.memory_file = os.path.join(base_dir, "brain", "memory.json")
         
-        # Initialize Truth Kernel
+        # Initialize Cortex AI (Local Ollama)
         try:
-            from backend.ai.gi5 import GI5Engine
-            self.truth_kernel = GI5Engine()
+            from backend.ai.cortex import CortexEngine
+            self.truth_kernel = CortexEngine()
         except:
             self.truth_kernel = None
             
@@ -38,7 +38,7 @@ class KappaAgent(BaseAgent):
 
     async def setup(self):
         # Listen for success stories to archive
-        self.bus.subscribe(EventType.JOB_COMPLETED, self.archive_victory)
+        self.bus.subscribe(EventType.VULN_CONFIRMED, self.archive_victory)
         # GAP FIX: Listen for raw recon data to audit
         self.bus.subscribe(EventType.VULN_CANDIDATE, self.audit_candidate)
 
@@ -47,41 +47,37 @@ class KappaAgent(BaseAgent):
         Antigravity V12: The Forensic Truth Kernel Audit
         """
         payload = event.payload
-        print(f"[{self.name}] [AUDIT] Auditing Candidate: {payload.get('description', 'Unknown')}")
+        # print(f"[{self.name}] [AUDIT] Auditing Candidate: {payload.get('description', 'Unknown')}")
         
+        # Archive verified finding or just the candidate
+        self._save_record(payload)
+
+        # CORTEX AI: Assess candidate validity
         if self.truth_kernel and self.truth_kernel.enabled:
-            # Generate Forensic Report Block
-            forensic_data = self.truth_kernel.generate_forensic_report_block(payload)
-            payload['forensic_analysis'] = forensic_data
-            payload['verified'] = True
-            
-            # Archive verified finding
-            self._save_record(payload)
-            
-            # Announce Verification
-            await self.bus.publish(HiveEvent(
-                type=EventType.VULN_CONFIRMED,
-                source=self.name,
-                payload=payload
-            ))
-        else:
-            # Fallback for offline mode
-            self._save_record(payload)
+            try:
+                verdict = self.truth_kernel.audit_candidate(payload)
+                confidence = verdict.get('confidence', 0.5)
+                is_real = verdict.get('is_real', True)
+                reason = verdict.get('reasoning', 'N/A')
+                print(f"[{self.name}] [AI AUDIT] Real={is_real} Confidence={confidence:.1f} Reason={reason}")
+                
+                if not is_real and confidence > 0.7:
+                    print(f"[{self.name}] [AI AUDIT] FALSE POSITIVE suppressed. Will not escalate.")
+                    return  # Don't escalate false positives
+            except Exception as e:
+                print(f"[{self.name}] [AI AUDIT] CortexEngine error: {e}")
 
     async def archive_victory(self, event: HiveEvent):
         payload = event.payload
-        # Determine if success
-        status = payload.get("status")
-        if status == "VULN_FOUND":
-            print(f"[{self.name}] [ARCHIVE] Vulnerability found by {event.source}")
-            self._save_record(payload)
-            
-            # Emit Archive Log for Report
-            await self.bus.publish(HiveEvent(
-                type=EventType.LOG,
-                source=self.name,
-                payload={"message": f"Vector {payload.get('payload', {}).get('type', 'logic_overflow')} stored in Hive Memory."}
-            ))
+        print(f"[{self.name}] [ARCHIVE] Vulnerability found by {event.source}")
+        self._save_record(payload)
+        
+        # Emit Archive Log for Report
+        await self.bus.publish(HiveEvent(
+            type=EventType.LOG,
+            source=self.name,
+            payload={"message": f"Vector {payload.get('type', 'logic_overflow')} stored in Hive Memory."}
+        ))
 
     def _save_record(self, record):
         try:

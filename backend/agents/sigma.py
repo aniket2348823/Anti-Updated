@@ -3,26 +3,51 @@ import base64
 import random
 import urllib.parse
 from backend.core.hive import BaseAgent, EventType, HiveEvent
-from backend.core.protocol import JobPacket, ResultPacket, AgentID
-from backend.ai.gi5 import GI5Engine
+from backend.core.protocol import JobPacket, ResultPacket, AgentID, TaskTarget, ModuleConfig
+from backend.ai.cortex import CortexEngine
 import json
+import aiohttp
+
+# Import Arsenals
+from backend.modules.tech.sqli import SQLInjectionProbe
+from backend.modules.tech.fuzzer import APIFuzzer
+from backend.modules.tech.jwt import JWTTokenCracker
+from backend.modules.tech.auth_bypass import AuthBypassTester
+from backend.modules.logic.tycoon import TheTycoon
+from backend.modules.logic.doppelganger import Doppelganger
+from backend.modules.logic.skipper import TheSkipper
+from backend.modules.logic.chronomancer import Chronomancer
+from backend.modules.logic.escalator import TheEscalator
 
 class SigmaAgent(BaseAgent):
     """
-    AGENT SIGMA: THE SMITH
-    Role: Generative Weaponssmith.
+    AGENT SIGMA: THE ORCHESTRATOR
+    Role: Execution Pipeline & Generative Weaponssmith.
     Capabilities:
-    - Context-Aware Code Gen (Template Engine).
-    - Obfuscation Engine (Base64, Hex, URL).
+    - Hosts all 9 Arsenal Modules natively.
+    - Resolves pure math payloads to network IO state arrays.
+    - AI-Powered Context-Aware Payload Generation.
     """
     def __init__(self, bus):
         super().__init__("agent_sigma", bus)
         
-        # SOTA: AI Generator 
+        # CORTEX AI Generator
         try:
-            self.ai = GI5Engine()
+            self.ai = CortexEngine()
         except:
              self.ai = None
+
+        self.arsenal = {
+            "tech_sqli": SQLInjectionProbe(),
+            "tech_fuzzer": APIFuzzer(),
+            "tech_jwt": JWTTokenCracker(),
+            "tech_auth_bypass": AuthBypassTester(),
+            "logic_tycoon": TheTycoon(),
+            "logic_doppelganger": Doppelganger(),
+            "logic_skipper": TheSkipper(),
+            "logic_chronomancer": Chronomancer(),
+            "logic_escalator": TheEscalator()
+        }
 
         self.payload_templates = [
             "<script>alert('{context_var}')</script>",
@@ -34,8 +59,30 @@ class SigmaAgent(BaseAgent):
         # Listen for requests to generate payloads (e.g. from Beta)
         self.bus.subscribe(EventType.JOB_ASSIGNED, self.handle_generation_request)
 
+    async def _fetch(self, target: TaskTarget) -> tuple[TaskTarget, str]:
+        try:
+            kwargs = {}
+            if target.payload:
+                if target.method.upper() in ["POST", "PUT", "PATCH"]:
+                    if "Content-Type" in target.headers and "application/x-www-form-urlencoded" in target.headers["Content-Type"]:
+                        kwargs["data"] = target.payload
+                    else:
+                        kwargs["json"] = target.payload
+                        
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.request(target.method, target.url, headers=target.headers, **kwargs) as resp:
+                    chunks = []
+                    async for chunk in resp.content.iter_chunked(1024 * 64):
+                        chunks.append(chunk)
+                        if sum(len(c) for c in chunks) > 5 * 1024 * 1024:
+                            break
+                    text = b"".join(chunks).decode("utf-8", errors="replace")
+                    return target, text
+        except Exception as e:
+            return target, ""
+
     async def handle_generation_request(self, event: HiveEvent):
-        # Sigma primarily serves other agents, but can execute "Gen-AI" jobs
         packet_dict = event.payload
         try:
              packet = JobPacket(**packet_dict)
@@ -44,23 +91,102 @@ class SigmaAgent(BaseAgent):
         if packet.config.agent_id != AgentID.SIGMA:
             return
 
-        print(f"[{self.name}] Forging payloads for {packet.target.url}...")
+        module_id = packet.config.module_id
+        
+        if module_id in self.arsenal:
+            print(f"[{self.name}] [PLAN] Orchestrating '{module_id}' execution on {packet.target.url}")
+            module = self.arsenal[module_id]
+            
+            # 1. PLAN: Generate target payloads
+            targets = await module.generate_payloads(packet)
+            if not targets:
+                await self.bus.publish(HiveEvent(type=EventType.JOB_COMPLETED, source=self.name, payload={"job_id": packet.id, "status": "SUCCESS"}))
+                return
+            
+            # BROADCAST LIVE ATTACK INTENT
+            await self.bus.publish(HiveEvent(
+                type=EventType.LIVE_ATTACK,
+                source=self.name,
+                payload={
+                    "url": packet.target.url,
+                    "arsenal": module_id,
+                    "action": "Orchestrating multi-vector assault",
+                    "payload_count": len(targets)
+                }
+            ))
+                
+            # 2. EXECUTE: Concurrently fetch
+            # Cyber-Organism Protocol: Native gathered orchestration
+            print(f"[{self.name}] [EXECUTE] Dispatching {len(targets)} asynchronous network tasks...")
+            
+            # Task wrapper for granular broadcasting
+            async def broadcast_fetch(t):
+                await self.bus.publish(HiveEvent(
+                    type=EventType.LIVE_ATTACK,
+                    source=self.name,
+                    payload={
+                        "url": t.url,
+                        "arsenal": module_id,
+                        "action": "Injecting weaponized payload",
+                        "payload": str(t.payload)[:100] + ("..." if len(str(t.payload)) > 100 else "")
+                    }
+                ))
+                return await self._fetch(t)
+
+            results = await asyncio.gather(*[broadcast_fetch(t) for t in targets])
+            
+            # 3. OBSERVE: Analyze interactions
+            print(f"[{self.name}] [OBSERVE] Applying pure module evaluation...")
+            vulns = await module.analyze_responses(list(results), packet)
+            
+            # REAL-TIME SYNC: Publish VULN_CONFIRMED if found
+            if vulns:
+                for v in vulns:
+                    await self.bus.publish(HiveEvent(
+                        type=EventType.VULN_CONFIRMED,
+                        source=self.name,
+                        payload={
+                            "type": module_id.upper(),
+                            "url": packet.target.url,
+                            "severity": getattr(v, "severity", "HIGH"),
+                            "payload": str(packet.target.payload),
+                            "evidence": getattr(v, "evidence", "None")
+                        }
+                    ))
+            
+            await self.bus.publish(HiveEvent(
+                type=EventType.JOB_COMPLETED,
+                source=self.name,
+                payload={
+                    "job_id": packet.id,
+                    "status": "VULN_FOUND" if vulns else "SUCCESS",
+                    "vulnerabilities": [v.model_dump() for v in vulns]
+                }
+            ))
+            return
+            
+        # 4. IF SIGMA_BYPASS (Weaponssmith generation)
+        print(f"[{self.name}] Forging evasion payloads for {packet.target.url}...")
         
         # 1. CONTEXT AWARE GENERATION
         generated_payloads = []
         
-        # Try AI First
+        # Try AI First (Ollama Cortex)
         if self.ai and self.ai.enabled:
-             print(f"[{self.name}] >> Accessing Truth Kernel for Generative Payloads...")
-             # GI5 returns a list of dicts: [ {"name": "...", "json": {...}} ]
-             # We need to extract the raw strings or specialized JSON
-             variants = self.ai.synthesize_payloads({"url": packet.target.url, "method": "GET"})
-             for v in variants:
-                  # Extract payload string if possible
-                  p_str = json.dumps(v.get("json", {}))
-                  generated_payloads.append(p_str)
-        else:
-             # Fallback to Templates
+             print(f"[{self.name}] >> CORTEX AI: Generating context-aware payloads via Ollama...")
+             try:
+                 ai_payloads = await self.ai.generate_attack_payloads(
+                     target_url=packet.target.url,
+                     attack_types=["XSS", "SQLi", "SSTI", "Path Traversal"]
+                 )
+                 if ai_payloads:
+                     generated_payloads.extend(ai_payloads)
+                     print(f"[{self.name}] >> CORTEX AI: Generated {len(ai_payloads)} intelligent payloads.")
+             except Exception as e:
+                 print(f"[{self.name}] CORTEX AI Failure. Falling back to templates: {e}")
+        
+        # Fallback to Templates if AI produced nothing
+        if not generated_payloads:
              context = {
                 "context_var": "XSS_BY_SIGMA",
                 "context_table": "admin_creds",

@@ -1,102 +1,76 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from io import BytesIO
 import uuid
 import random
 import os
 
 from backend.core.state import stats_db
-
-from backend.core.state import stats_db
-import os
+from backend.core.reporting import ReportGenerator
 
 router = APIRouter()
+
+# Unified Path Resolution
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # .../api/endpoints
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, "..", "..", ".."))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
+
+# Ensure directory exists
+if not os.path.exists(REPORTS_DIR):
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+
+@router.get("/download/{filename}")
+async def download_report_file(filename: str):
+    file_path = os.path.join(REPORTS_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path=file_path, filename=filename, media_type='application/pdf')
 
 @router.get("/")
 async def list_reports():
     """
     Lists all generated PDF reports.
     """
-    reports_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "reports")
-    if not os.path.exists(reports_dir):
+    if not os.path.exists(REPORTS_DIR):
         return []
     
-    files = [f for f in os.listdir(reports_dir) if f.endswith(".pdf")]
-    # Return as list of dicts for UI
-    return [{"name": f, "path": f"/api/reports/pdf/{f}"} for f in files]
+    files = [f for f in os.listdir(REPORTS_DIR) if f.endswith(".pdf")]
+    # Extract scan_id from Scan_Report_{id}.pdf
+    def extract_id(fname):
+        if fname.startswith("Scan_Report_") and fname.endswith(".pdf"):
+            return fname.replace("Scan_Report_", "").replace(".pdf", "")
+        return fname
+
+    return [{"name": f, "path": f"/api/reports/pdf/{extract_id(f)}"} for f in files]
 @router.get("/pdf/{scan_id}")
 async def generate_pdf_report(scan_id: str):
     """
-    Generates and serves a professional PDF security report.
-    Always generates fresh report with serial numbered filename.
+    Serves a generated PDF security report.
+    Unified Cache-Only Dispatch (V6).
     """
-    from backend.core.reporting import ReportGenerator
-
-    # Fetch scan data
-    scan_data = next((s for s in stats_db.get("scans", []) if s["id"] == scan_id), None)
-    if not scan_data:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    filename = f"Scan_Report_{scan_id}.pdf"
+    report_path = os.path.join(REPORTS_DIR, filename)
     
-    # Build events list from scan data
-    events = []
-    events.append({
-        "type": "TARGET_ACQUIRED", 
-        "timestamp": scan_data.get("timestamp"), 
-        "source": "Orchestrator", 
-        "payload": {"url": scan_data.get("scope", "Unknown")}
-    })
-    events.append({
-        "type": "JOB_ASSIGNED", 
-        "timestamp": scan_data.get("timestamp"), 
-        "source": "Sigma", 
-        "payload": "Payload Generation Matrix Active"
-    })
-    events.append({
-        "type": "LOG", 
-        "timestamp": scan_data.get("timestamp"), 
-        "source": "Beta", 
-        "payload": "Injection Vector Executed"
-    })
-    
-    # Add vulnerability events based on scan status
-    if scan_data.get("status") in ["Vulnerable", "Completed"]:
-        events.append({
-            "type": "VULN_CONFIRMED", 
-            "timestamp": scan_data.get("timestamp"), 
-            "source": "Gamma", 
-            "payload": {"type": "Logic/IDOR", "payload": '{"admin": true}'}
-        })
-        events.append({
-            "type": "GI5_LOG", 
-            "timestamp": scan_data.get("timestamp"), 
-            "source": "Kappa", 
-            "payload": "Artifact Archived"
-        })
-
     try:
-        # Generate the report
-        gen = ReportGenerator()
-        out_path = gen.generate_report(scan_id, events, scan_data.get("scope", "Unknown"))
-        
-        # Serve the generated file
-        if os.path.exists(out_path):
-            with open(out_path, "rb") as f:
-                pdf_content = f.read()
-            
-            # Extract filename from path
-            filename = os.path.basename(out_path)
-            
-            buffer = BytesIO(pdf_content)
-            headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-            return StreamingResponse(buffer, media_type='application/pdf', headers=headers)
+        if os.path.exists(report_path):
+            return FileResponse(
+                path=report_path,
+                media_type='application/pdf',
+                filename=f"Scan_Report_{scan_id}.pdf"
+            )
         else:
-            raise Exception("Report generation completed but file not found.")
+            # Check if scan exists but report isn't ready
+            from backend.core.state import stats_db
+            scan_data = next((s for s in stats_db.get("scans", []) if s["id"] == scan_id), None)
+            if not scan_data:
+                raise HTTPException(status_code=404, detail="Scan record not found.")
+            
+            raise HTTPException(status_code=404, detail="AI Report is still being finalized. Please wait for the 'Ready' signal.")
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"ON-DEMAND GEN FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Report Generation Failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Atomic Serve Failure: {str(e)}")
 
 @router.get("/consolidated")
 async def generate_consolidated_report():
